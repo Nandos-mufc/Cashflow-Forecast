@@ -678,6 +678,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const [whatIf, setWhatIf] = useState({ growth: 0, inflation: 0, life: 0 });
   const [goalOpen, setGoalOpen] = useState(false);
   const [stressOpen, setStressOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [stress, setStress] = useState(null);
   const [ci, setCi] = useState(null);
   const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000 });
@@ -990,6 +991,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           {!present && (<>
             <select className="cur-sel num" value={cur} onChange={(e) => setProfile((p) => ({ ...p, currency: e.target.value }))}>{Object.values(CURRENCIES).map((c) => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}</select>
             <button className="icon-btn" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
+            <button className="report-btn" onClick={() => setReportOpen(true)}><FileText size={15} /><span>Report</span></button>
           </>)}
           <button className="btn-primary" onClick={() => setPresent(!present)}>{present ? <Minimize2 size={15} /> : <Maximize2 size={15} />}<span>{present ? "Exit client view" : "Client view"}</span></button>
         </div>
@@ -1400,6 +1402,186 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             </div>
           </div>
         )}
+        {reportOpen && (() => {
+          const reportDate = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+          const clientName = couple ? `${c1.name || "Client 1"} & ${c2.name || "Client 2"}` : (c1.name || "Client");
+          const retRow = data.find((r) => r.c1Age === ectx.retC1);
+          const basis = showReal ? "Today's money (real terms)" : "Future money (nominal terms)";
+          const ownerLabel = (o) => (o === "joint" ? "Joint" : o === "client2" ? fn2 : fn1);
+          const insuredLabel = (o) => (o === "client2" ? fn2 : fn1);
+          const anchorTxt = (a) => { if (!a) return "—"; if (a.mode === "now") return "Start"; if (a.mode === "retirement") return "Retirement"; if (a.mode === "end") return "End of plan"; if (a.mode === "age") return `Age ${a.age}`; return "—"; };
+          const escTxt = (it) => (it.escalation === "inflation" ? `Inflation (${inflation}%)` : it.escalation === "custom" ? `${it.customEsc || 0}%` : "None");
+          const freqTxt = (it) => (it.frequency === "monthly" ? "Monthly" : it.frequency === "oneoff" ? "One-off" : it.frequency === "everyN" ? `Every ${it.everyYears || 1} yrs` : "Annual");
+          const m = (v) => fmtFull(v, cur);
+          const verdictText = kpis.depletionAge === null
+            ? `Based on the assumptions set out in this report, the plan remains fully funded throughout, with approximately ${m(kpis.endVal)} of net worth remaining at the end of the plan in ${kpis.endYear}.`
+            : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. Adjusting contributions, retirement age or planned spending would close this gap.`;
+          const longevity = kpis.depletionAge === null ? "Funded for life" : `Funds to age ${kpis.depletionAge}`;
+          return (
+            <div className="report-overlay">
+              <div className="report-toolbar report-no-print">
+                <span className="report-tb-title"><FileText size={15} /> Plan report — {clientName}</span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="goal-btn" onClick={() => window.print()}>Print / Save as PDF</button>
+                  <button className="wi-reset" onClick={() => setReportOpen(false)}>Close</button>
+                </div>
+              </div>
+              <div className="report-sheet">
+
+                {/* Page 1 — cover + summary */}
+                <section className="report-page">
+                  <div className="rep-cover">
+                    <div className="rep-cover-mark"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 20 L9 12 L13 15 L21 4" fill="none" stroke="#2e9e6b" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /><circle cx="21" cy="4" r="2.3" fill="#2e9e6b" /></svg> Cashflow plan</div>
+                    <h1 className="rep-h1">{clientName}</h1>
+                    <div className="rep-meta">Prepared {reportDate} · Figures in {basis} · Currency {cur}</div>
+                  </div>
+
+                  <div className={`rep-verdict rep-${banner.tone}`}>
+                    <div className="rep-verdict-tag">{kpis.depletionAge === null ? "Fully funded" : kpis.tone === "red" ? "At risk" : "Caution"}</div>
+                    <div className="rep-verdict-text">{verdictText}</div>
+                  </div>
+
+                  <div className="rep-kpis">
+                    <div className="rep-kpi"><span>Net worth today</span><b className="num">{m(kpis.currentTotal)}</b></div>
+                    <div className="rep-kpi"><span>At retirement</span><b className="num">{m(kpis.atRetirement)}</b></div>
+                    <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
+                    <div className="rep-kpi"><span>Plan longevity</span><b className="num">{longevity}</b></div>
+                  </div>
+
+                  <div className="rep-people">
+                    <div className="rep-person"><b>{fn1}</b><span>Born {c1.dob} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
+                    {couple && <div className="rep-person"><b>{fn2}</b><span>Born {c2.dob} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</span></div>}
+                  </div>
+                </section>
+
+                {/* Page 2 — net worth chart */}
+                <section className="report-page">
+                  <h2 className="rep-h2">Projected net worth</h2>
+                  <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.</p>
+                  <div className="rep-chart">
+                    <ResponsiveContainer width="100%" height={340}>
+                      <ComposedChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                        <CartesianGrid stroke="#eceff3" vertical={false} />
+                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
+                        <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
+                        {stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.9} isAnimationActive={false} />)}
+                        {hasProperty && <Line type="monotone" dataKey="investable" stroke="#7a8493" strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
+                        {hasDebt && <Line type="monotone" dataKey="netWorth" stroke="#161b22" strokeWidth={1.6} dot={false} isAnimationActive={false} />}
+                        {markers.retC1 && <ReferenceLine x={markers.retC1} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
+                        {markers.retC2 && <ReferenceLine x={markers.retC2} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="rep-legend">
+                    {legendTypes.map((ty) => <span key={ty}><i style={{ background: typeSwatch(ty) }} /> {TYPE_LABEL[ty]}</span>)}
+                    {hasProperty && <span><i className="rep-dash" /> Spendable (excl. property)</span>}
+                    {hasDebt && <span><i className="rep-solid" /> Net worth after debts</span>}
+                  </div>
+                </section>
+
+                {/* Page 3 — money in vs out */}
+                <section className="report-page">
+                  <h2 className="rep-h2">Money in versus money out</h2>
+                  <p className="rep-p">Annual income by source against total spending (the line). Where spending exceeds income, the shortfall is drawn from savings.</p>
+                  <div className="rep-chart">
+                    <ResponsiveContainer width="100%" height={340}>
+                      <ComposedChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                        <CartesianGrid stroke="#eceff3" vertical={false} />
+                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
+                        <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
+                        {incomes.map((i) => <Bar key={i.id} dataKey={iKey(i.id)} stackId="mio" fill={incColors[i.id]} fillOpacity={0.9} isAnimationActive={false} />)}
+                        <Bar dataKey="coveredBySavings" stackId="mio" fill="#e0a23a" fillOpacity={0.85} isAnimationActive={false} />
+                        <Bar dataKey="uncovered" stackId="mio" fill="#d64545" fillOpacity={0.9} isAnimationActive={false} />
+                        <Line type="monotone" dataKey="expenditure" stroke="#161b22" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="rep-legend">
+                    <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
+                    <span><i style={{ background: "#e0a23a" }} /> Drawn from savings</span>
+                    <span><i style={{ background: "#d64545" }} /> Shortfall</span>
+                    <span><i className="rep-solid" /> Total spending</span>
+                  </div>
+                </section>
+
+                {/* Page 4 — assets & income */}
+                <section className="report-page">
+                  <h2 className="rep-h2">Assets</h2>
+                  <table className="rep-table">
+                    <thead><tr><th>Asset</th><th>Owner</th><th>Type</th><th className="r">Current value</th><th className="r">Growth</th><th className="r">At retirement</th></tr></thead>
+                    <tbody>
+                      {assets.length === 0 ? <tr><td colSpan={6} className="rep-empty">No assets entered.</td></tr> : assets.map((a) => (
+                        <tr key={a.id}><td>{a.name}{a.offshoreBond ? " (offshore bond)" : ""}</td><td>{ownerLabel(a.owner)}</td><td>{TYPE_LABEL[a.type]}</td><td className="r num">{m(Number(a.value) || 0)}</td><td className="r num">{Number(a.growthRate) || 0}%</td><td className="r num">{retRow ? m(retRow[aKey(a.id)] || 0) : "—"}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  <h2 className="rep-h2" style={{ marginTop: 26 }}>Income</h2>
+                  <table className="rep-table">
+                    <thead><tr><th>Source</th><th>Owner</th><th className="r">Amount</th><th>Frequency</th><th>From</th><th>To</th><th>Increases</th></tr></thead>
+                    <tbody>
+                      {incomes.length === 0 ? <tr><td colSpan={7} className="rep-empty">No income entered.</td></tr> : incomes.map((i) => (
+                        <tr key={i.id}><td>{i.name}</td><td>{ownerLabel(i.owner)}</td><td className="r num">{sym}{(Number(i.amount) || 0).toLocaleString()}</td><td>{freqTxt(i)}</td><td>{anchorTxt(i.start)}</td><td>{i.frequency === "oneoff" ? "—" : anchorTxt(i.end)}</td><td>{escTxt(i)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+
+                {/* Page 5 — expenses, liabilities, protection, assumptions */}
+                <section className="report-page">
+                  <h2 className="rep-h2">Expenditure</h2>
+                  <table className="rep-table">
+                    <thead><tr><th>Item</th><th>Owner</th><th className="r">Amount</th><th>Frequency</th><th>From</th><th>To</th><th>Priority</th></tr></thead>
+                    <tbody>
+                      {expenses.length === 0 ? <tr><td colSpan={7} className="rep-empty">No expenditure entered.</td></tr> : expenses.map((e) => (
+                        <tr key={e.id}><td>{e.name}</td><td>{ownerLabel(e.owner)}</td><td className="r num">{sym}{(Number(e.amount) || 0).toLocaleString()}</td><td>{freqTxt(e)}</td><td>{anchorTxt(e.start)}</td><td>{e.frequency === "oneoff" ? "—" : anchorTxt(e.end)}</td><td>{e.priority === "discretionary" ? "Discretionary" : "Essential"}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {liabilities.length > 0 && <>
+                    <h2 className="rep-h2" style={{ marginTop: 26 }}>Liabilities</h2>
+                    <table className="rep-table">
+                      <thead><tr><th>Liability</th><th>Owner</th><th className="r">Balance</th><th className="r">Rate</th><th className="r">Monthly payment</th></tr></thead>
+                      <tbody>{liabilities.map((L) => <tr key={L.id}><td>{L.name}</td><td>{ownerLabel(L.owner)}</td><td className="r num">{m(Number(L.balance) || 0)}</td><td className="r num">{Number(L.rate) || 0}%</td><td className="r num">{sym}{(Number(L.monthlyPayment) || 0).toLocaleString()}</td></tr>)}</tbody>
+                    </table>
+                  </>}
+
+                  {protection.length > 0 && <>
+                    <h2 className="rep-h2" style={{ marginTop: 26 }}>Protection</h2>
+                    <table className="rep-table">
+                      <thead><tr><th>Policy</th><th>Insured</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
+                      <tbody>{protection.map((p) => <tr key={p.id}><td>{p.name}</td><td>{insuredLabel(p.insured)}</td><td className="r num">{m(Number(p.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p.coverToAge) >= 110 ? "Whole of life" : `Age ${p.coverToAge}`}</td></tr>)}</tbody>
+                    </table>
+                  </>}
+
+                  <h2 className="rep-h2" style={{ marginTop: 26 }}>Key assumptions</h2>
+                  <table className="rep-table">
+                    <tbody>
+                      <tr><td>Inflation</td><td className="r num">{inflation}%</td></tr>
+                      {couple && <tr><td>Surviving partner's spending</td><td className="r num">{assumptions.survivorExpenseFactor}% of joint costs</td></tr>}
+                      <tr><td>Tax treatment</td><td className="r">{assumptions.tax && assumptions.tax.enabled ? "Illustrative tax applied (see note)" : "Not applied — figures as entered"}</td></tr>
+                      <tr><td>Figures shown in</td><td className="r">{basis}</td></tr>
+                    </tbody>
+                  </table>
+                </section>
+
+                {/* Page 6 — notes & disclaimer */}
+                <section className="report-page report-last">
+                  {annotations.length > 0 && <>
+                    <h2 className="rep-h2">Adviser notes</h2>
+                    <ul className="rep-notes">{annotations.slice().sort((a, b) => a.year - b.year).map((n) => <li key={n.id}><b className="num">{n.year}</b> — {n.text || "Note"}</li>)}</ul>
+                  </>}
+                  <h2 className="rep-h2" style={{ marginTop: annotations.length ? 26 : 0 }}>Important information</h2>
+                  <p className="rep-disc">This report is an illustration based on the assumptions and figures shown above, which have been provided or agreed with you. It is not a guarantee of future outcomes. Investment growth is assumed and actual returns will vary; values can fall as well as rise.</p>
+                  <p className="rep-disc">Any tax figures shown are illustrative only and do not constitute tax advice. Tax treatment depends on individual circumstances and on the rules of each relevant jurisdiction, which may change. You should obtain advice from a qualified tax specialist before acting.</p>
+                  <p className="rep-disc">This document does not constitute a personal recommendation. Please discuss any decisions with your financial adviser.</p>
+                </section>
+
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -1652,6 +1834,58 @@ const CSS = `
 .active-overlay{display:flex;align-items:center;justify-content:space-between;gap:10px;background:color-mix(in srgb, var(--red) 9%, transparent);border:1px solid color-mix(in srgb, var(--red) 30%, transparent);border-radius:10px;padding:9px 13px;margin-bottom:15px;font-size:12.5px;color:var(--ink);}
 .active-overlay span{display:flex;align-items:center;gap:7px;font-weight:500;}
 .active-overlay button{border:none;background:var(--red);color:#fff;font-family:inherit;font-weight:600;font-size:11.5px;padding:5px 12px;border-radius:7px;cursor:pointer;flex:none;}
+.report-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);background:var(--card);color:var(--ink);font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:9px;cursor:pointer;white-space:nowrap;}
+.report-btn:hover{border-color:var(--border-strong);}
+.report-overlay{position:fixed;inset:0;z-index:300;background:#f3f4f6;overflow:auto;color:#1a1f28;font-family:"Hanken Grotesk",ui-sans-serif,system-ui,sans-serif;}
+.report-toolbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 18px;background:#fff;border-bottom:1px solid #e2e6ec;}
+.report-tb-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;}
+.report-sheet{max-width:820px;margin:22px auto;background:#fff;border:1px solid #e2e6ec;border-radius:6px;padding:46px 52px;box-shadow:0 8px 30px rgba(20,30,50,.06);}
+.report-page{padding-bottom:34px;margin-bottom:34px;border-bottom:1px solid #eef1f4;}
+.report-page.report-last{border-bottom:none;margin-bottom:0;}
+.rep-cover{margin-bottom:26px;}
+.rep-cover-mark{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:#2e9e6b;letter-spacing:.02em;text-transform:uppercase;}
+.rep-h1{font-family:"Fraunces",Georgia,serif;font-size:34px;font-weight:600;margin:10px 0 6px;letter-spacing:-.01em;}
+.rep-meta{font-size:12.5px;color:#7a8493;}
+.rep-h2{font-family:"Fraunces",Georgia,serif;font-size:19px;font-weight:600;margin:0 0 4px;}
+.rep-p{font-size:12.5px;color:#5b6573;margin:0 0 14px;line-height:1.5;}
+.rep-verdict{border-radius:11px;padding:16px 18px;margin-bottom:22px;border:1px solid;}
+.rep-verdict-tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;}
+.rep-verdict-text{font-size:13.5px;line-height:1.5;color:#2a3038;}
+.rep-green{background:#eaf7f0;border-color:#bfe6d2;}.rep-green .rep-verdict-tag{color:#1f8a5b;}
+.rep-amber{background:#fdf4e3;border-color:#f2dca8;}.rep-amber .rep-verdict-tag{color:#b9831a;}
+.rep-red{background:#fbecec;border-color:#f1c4c4;}.rep-red .rep-verdict-tag{color:#c0392b;}
+.rep-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;}
+.rep-kpi{border:1px solid #e6e9ee;border-radius:10px;padding:13px 14px;}
+.rep-kpi span{display:block;font-size:11px;color:#7a8493;margin-bottom:5px;}
+.rep-kpi b{font-size:18px;font-weight:600;letter-spacing:-.01em;}
+.rep-people{display:flex;gap:14px;flex-wrap:wrap;}
+.rep-person{flex:1;min-width:200px;border-left:3px solid #e6e9ee;padding:2px 0 2px 12px;}
+.rep-person b{display:block;font-size:13.5px;}
+.rep-person span{font-size:11.5px;color:#7a8493;}
+.rep-chart{width:100%;}
+.rep-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:11.5px;color:#5b6573;}
+.rep-legend span{display:inline-flex;align-items:center;gap:6px;}
+.rep-legend i{width:11px;height:11px;border-radius:3px;display:inline-block;}
+.rep-legend i.rep-dash{width:16px;height:0;border-radius:0;border-top:2px dashed #7a8493;}
+.rep-legend i.rep-solid{width:16px;height:0;border-radius:0;border-top:2px solid #161b22;}
+.rep-table{width:100%;border-collapse:collapse;font-size:12px;}
+.rep-table th{text-align:left;font-weight:600;color:#7a8493;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;padding:7px 9px;border-bottom:1.5px solid #e6e9ee;}
+.rep-table td{padding:8px 9px;border-bottom:1px solid #f0f2f5;color:#2a3038;}
+.rep-table th.r,.rep-table td.r{text-align:right;}
+.rep-empty{color:#9aa3b0;font-style:italic;}
+.rep-notes{margin:0;padding-left:18px;font-size:12.5px;color:#2a3038;line-height:1.7;}
+.rep-disc{font-size:11px;color:#7a8493;line-height:1.55;margin:0 0 10px;}
+@media print {
+  body * { visibility: hidden; }
+  .report-overlay, .report-overlay * { visibility: visible; }
+  .report-overlay { position: absolute; inset: 0; background: #fff; overflow: visible; }
+  .report-no-print { display: none !important; }
+  .report-sheet { margin: 0; border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
+  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+  .report-page.report-last { page-break-after: auto; }
+  .rep-table, .rep-kpi, .rep-chart, .rep-verdict { break-inside: avoid; }
+  @page { size: A4; margin: 16mm; }
+}
 .cash-head{margin-top:12px;border-top:1px solid var(--border);padding-top:11px;}
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
 .cash-title span{font-weight:400;font-size:11px;color:var(--low);}
