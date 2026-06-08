@@ -338,13 +338,14 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     });
 
     // expenditure for this year (pro-rated; death rules + survivor factor on joint)
-    let expenditure = 0;
+    let expenditure = 0, expEssential = 0, expDiscretionary = 0, liabRepay = 0, premiums = 0;
     expenses.forEach((e) => {
       let v = flowForYear(e, y, ctx, inflDec) * frac;
       const o = e.owner || "joint";
       if (couple && (o === "client1" || o === "client2") && !ownerAlive(o)) v = 0;
       else if (couple && o === "joint" && firstDeath) v *= survFactor;
       expenditure += v;
+      if (e.priority === "discretionary") expDiscretionary += v; else expEssential += v;
     });
 
     // liability repayments are cashflow out (full amount — debt doesn't shrink on death), then amortize the balance
@@ -356,6 +357,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
         const pay = Math.min(sched, grown);
         liab[L.id] = Math.max(0, grown - pay);
         expenditure += pay;
+        liabRepay += pay;
       }
     });
 
@@ -365,7 +367,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       const insAge = o === "client2" ? c2Age : c1Age;
       const insAlive = o === "client2" ? aliveC2 : aliveC1;
       const inCover = insAlive && (!p.coverToAge || insAge <= Number(p.coverToAge));
-      if (inCover) expenditure += (Number(p.premium) || 0) * 12 * frac;
+      if (inCover) { const prem = (Number(p.premium) || 0) * 12 * frac; expenditure += prem; premiums += prem; }
     });
 
     // grow balances over the (partial) year — a stress test adds a per-year growth shock (percentage points)
@@ -486,7 +488,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     }
 
     const status = shortfall > 0 ? "red" : net >= 0 ? "green" : "amber";
-    rows.push({ y, year: baseYear + y, c1Age, c2Age, aliveC1, aliveC2, firstDeath, total, property, debt, income, expenditure, net, status, shortfall, taxPaid, incomeBy, ...pots });
+    rows.push({ y, year: baseYear + y, c1Age, c2Age, aliveC1, aliveC2, firstDeath, total, property, debt, income, expenditure, expEssential, expDiscretionary, liabRepay, premiums, contrib: contribPersonal, net, status, shortfall, taxPaid, incomeBy, ...pots });
 
     prevAliveC1 = aliveC1;
     prevAliveC2 = aliveC2;
@@ -698,6 +700,14 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations });
   }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches dark/light.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const prev = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute("data-theme", theme);
+    return () => { if (prev) document.documentElement.setAttribute("data-theme", prev); else document.documentElement.removeAttribute("data-theme"); };
+  }, [theme]);
+
   // What-if overlay — adjusts the inputs that feed the projection without changing the saved plan
   const whatIfActive = whatIf.growth !== 0 || whatIf.inflation !== 0 || whatIf.life !== 0;
   const resetWhatIf = () => setWhatIf({ growth: 0, inflation: 0, life: 0 });
@@ -766,11 +776,11 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     const dz = (v) => v / f;
     const sr = stressRows && stressRows[idx] ? stressRows[idx] : null;
     const flow = sr || r; // money-in-vs-out reflects the active scenario (e.g. CI salary drop, crash depletion)
-    const o = { year: r.year, y: r.y, c1Age: r.c1Age, c2Age: r.c2Age, aliveC1: r.aliveC1, aliveC2: r.aliveC2, total: dz(r.total), property: dz(r.property), investable: dz(r.total - r.property), debt: dz(r.debt || 0), netWorth: dz(r.total - (r.debt || 0)), income: dz(flow.income), expenditure: dz(flow.expenditure), taxPaid: dz(flow.taxPaid || 0) };
+    const o = { year: r.year, y: r.y, c1Age: r.c1Age, c2Age: r.c2Age, aliveC1: r.aliveC1, aliveC2: r.aliveC2, total: dz(r.total), property: dz(r.property), investable: dz(r.total - r.property), debt: dz(r.debt || 0), netWorth: dz(r.total - (r.debt || 0)), income: dz(flow.income), expenditure: dz(flow.expenditure), taxPaid: dz(flow.taxPaid || 0), contrib: dz(flow.contrib || 0), outgoings: dz(flow.expenditure + (flow.contrib || 0)), expEssential: dz(flow.expEssential || 0), expDiscretionary: dz(flow.expDiscretionary || 0), premiums: dz(flow.premiums || 0), liabRepay: dz(flow.liabRepay || 0) };
     if (sr) o.stressed = dz(sr.total - (sr.debt || 0));
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
-    const gap = Math.max(0, flow.expenditure - flow.income);
+    const gap = Math.max(0, (flow.expenditure + (flow.contrib || 0)) - flow.income);
     o.coveredBySavings = dz(Math.max(0, gap - flow.shortfall));
     o.uncovered = dz(flow.shortfall);
     return o;
@@ -796,6 +806,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   }, [ectx, rows, couple, baseYear]);
 
   const hasDebt = useMemo(() => liabilities.some((L) => (Number(L.balance) || 0) > 0), [liabilities]);
+  const hasContrib = useMemo(() => assets.some((a) => a.contribution && a.contribution.enabled && a.contribution.source !== "employer" && (Number(a.contribution.amount) || 0) > 0), [assets]);
   const kpis = useMemo(() => {
     const grossNow = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
     const debtNow = liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0);
@@ -836,13 +847,33 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     return ev;
   }, [markers, kpis.depYear, couple, fn1, fn2, t]);
 
-  // Goal-seek — solves each lever to the point where the plan is just fully funded for life.
-  // Uses the real saved plan (not the what-if overlay). Each search is a binary/linear scan over the pure engine.
+  // Inflow events — money paid INTO the plan (life cover on death, a CI claim while stress-testing).
+  // These explain a step-up in the net-worth line that would otherwise look unexplained.
+  const payoutEvents = useMemo(() => {
+    const ev = [];
+    const c1Death = rows.find((r) => !r.aliveC1);
+    const c2Death = couple ? rows.find((r) => !r.aliveC2) : null;
+    protection.forEach((p) => {
+      const o = p.insured || "client1";
+      const dr = o === "client2" ? c2Death : c1Death;
+      if (!dr) return;
+      const ageAtDeath = o === "client2" ? dr.c2Age : dr.c1Age;
+      if (p.coverToAge && Number(p.coverToAge) < 110 && ageAtDeath > Number(p.coverToAge)) return;
+      if ((Number(p.sumAssured) || 0) <= 0) return;
+      ev.push({ label: `Life cover ${fmtFull(Number(p.sumAssured) || 0, cur)}`, year: dr.year, color: t.green });
+    });
+    if (ci && ciClaimYear != null) ev.push({ label: `CI claim ${fmtFull(Number(ci.amount) || 0, cur)}`, year: baseYear + ciClaimYear, color: t.green });
+    return ev;
+  }, [protection, rows, couple, ci, ciClaimYear, baseYear, cur, t]);
+
+  // "What if I asked…" — answers the questions clients actually ask, each solved against the pure engine.
+  // Uses the real saved plan (not the what-if overlay). Binary/linear scans; only runs while the panel is open.
   const goal = useMemo(() => {
     if (!goalOpen) return null;
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
+    const curSpend = expenses.reduce((s, e) => { const a = Number(e.amount) || 0; if (e.frequency === "monthly") return s + a * 12; if (e.frequency === "annual") return s + a; return s; }, 0); // recurring annual spend (excludes one-offs)
 
     // Growth: percentage points added to every asset's assumed return (monotonic — more is better)
     const gTest = (g) => funded({ ...base, assets: assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) + g })) });
@@ -857,17 +888,33 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     let retire = null;
     if (fundedNow) { let d = 0; while (d > -25 && rTest(d - 1)) d--; retire = d; }
     else { let d = 1; while (d <= 25 && !rTest(d)) d++; retire = d <= 25 ? d : null; }
+    const earliestRetAge = retire != null ? (Number(profile.client1.retirementAge) || 0) + retire : null;
 
     // Spending: multiplier on every expense (monotonic — more is worse)
     const sTest = (f) => funded({ ...base, expenses: expenses.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })) });
     let spend = null;
     if (fundedNow) {
-      if (sTest(4)) spend = 4;
-      else { let a = 1, b = 4; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
-    } else if (sTest(0.15)) { let a = 0.15, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
+      if (sTest(5)) spend = 5;
+      else { let a = 1, b = 5; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
+    } else if (sTest(0.1)) { let a = 0.1, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
+    const maxSpend = spend != null && curSpend > 0 ? curSpend * spend : null;
 
-    return { fundedNow, growth, growthCapped, retire, spend };
-  }, [goalOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection]);
+    // Max one-off purchase today, still funded for life (monotonic — bigger is worse)
+    const tmpExp = (extra) => ({ ...base, expenses: [...expenses, extra] });
+    const oTest = (amt) => funded(tmpExp({ id: "tmp_o", name: "one-off", amount: amt, frequency: "oneoff", escalation: "none", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
+    let maxOneOff = null;
+    if (fundedNow) { let a = 0, b = 5000000; if (oTest(b)) maxOneOff = b; else { for (let i = 0; i < 30; i++) { const m = (a + b) / 2; if (oTest(m)) a = m; else b = m; } maxOneOff = a; } }
+
+    // Max extra ongoing commitment (e.g. a new premium or rent), £/month, still funded (monotonic — bigger is worse)
+    const mTest = (mo) => funded(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
+    let maxMonthly = null;
+    if (fundedNow) { let a = 0, b = 50000; if (mTest(b)) maxMonthly = b; else { for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (mTest(m)) a = m; else b = m; } maxMonthly = a; } }
+
+    // Resilience: would the plan still hold if they lived to 100?
+    const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
+
+    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, maxOneOff, maxMonthly, to100, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
+  }, [goalOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
   const rmFn = (setter) => (id) => { setter((prev) => prev.filter((x) => x.id !== id)); setOpen((s) => { const n = new Set(s); n.delete(id); return n; }); };
@@ -928,7 +975,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const FlowTip = ({ active, payload }) => {
     if (!active || !payload || !payload.length) return null;
     const d = payload[0].payload;
-    const net = d.income - d.expenditure;
+    const net = d.income - d.outgoings;
     return (
       <div className="tip">
         <div className="tip-head"><b className="num">{d.year}</b> <span className="tip-yr">{agesLabel(d)}</span></div>
@@ -937,7 +984,12 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
         {d.coveredBySavings > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.amber }} /> Drawn from savings</span><span className="num">{fmtFull(d.coveredBySavings, cur)}</span></div>}
         {d.uncovered > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.red }} /> Unfunded shortfall</span><span className="num">{fmtFull(d.uncovered, cur)}</span></div>}
         <div className="tip-rule" />
+        {d.expEssential > 0 && <div className="tip-row"><span className="tip-name">Essential spending</span><span className="num">{fmtFull(d.expEssential, cur)}</span></div>}
+        {d.expDiscretionary > 0 && <div className="tip-row"><span className="tip-name">Discretionary spending</span><span className="num">{fmtFull(d.expDiscretionary, cur)}</span></div>}
+        {d.premiums > 0 && <div className="tip-row"><span className="tip-name">Protection premiums</span><span className="num">{fmtFull(d.premiums, cur)}</span></div>}
+        {d.liabRepay > 0 && <div className="tip-row"><span className="tip-name">Loan repayments</span><span className="num">{fmtFull(d.liabRepay, cur)}</span></div>}
         <div className="tip-total"><span>Total expenditure</span><b className="num">{fmtFull(d.expenditure, cur)}</b></div>
+        {d.contrib > 0 && <><div className="tip-row"><span className="tip-name">Savings / contributions</span><span className="num">{fmtFull(d.contrib, cur)}</span></div><div className="tip-row tip-sub"><span>Total money out</span><span className="num">{fmtFull(d.outgoings, cur)}</span></div></>}
         {d.taxPaid > 0 && <div className="tip-row"><span className="tip-name">Tax on withdrawals</span><span className="num">{fmtFull(d.taxPaid, cur)}</span></div>}
         <div className="tip-net" style={{ color: net >= 0 ? t.green : t.amber }}>{net >= 0 ? "Surplus " : "Funded by drawdown "}<span className="num">{fmtFull(Math.abs(net), cur)}</span></div>
       </div>
@@ -1043,14 +1095,14 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 {tax.enabled && (
                   <>
                     <div className="field"><label>CGT on investment withdrawals <InfoTip text="A simplified effective rate applied to money drawn from investment pots (not cash, pensions or offshore bonds). Set 0 for ISAs or non-resident clients with no CGT. It's an approximation you control, not a full gain calculation." /></label><Mini value={tax.cgtRate} suffix="%" onChange={(v) => setTax({ cgtRate: v })} /></div>
-                    <div className="tax-tl-head">Residence timeline <InfoTip text="Periods run in age order. The first starts now; add one to model a move — e.g. tax-free until 60, then UK rates from 60. Each year, pension and bond withdrawals are taxed at the rates of whichever period the client is in." /></div>
+                    <div className="tax-tl-head">Residence timeline <InfoTip text={`Periods run in age order, anchored to ${couple ? fn1 + "'s" : "the client's"} age. The first starts now; add one to model a move — e.g. tax-free until 60, then UK rates from 60. Tax only affects years where money is withdrawn from pensions or investment pots, so accumulation years won't change.`} /></div>
                     {tax.periods.map((p, idx) => (
                       <div className="tax-period" key={p.id}>
                         <div className="tax-period-top">
                           <input className="tax-label-in" value={p.label} onChange={(e) => upPeriod(p.id, { label: e.target.value })} placeholder="Jurisdiction" />
                           {idx === 0
                             ? <span className="tax-from">from now</span>
-                            : <span className="tax-from">from age <NumberInput className="tax-age" value={p.startAge} onCommit={(v) => upPeriod(p.id, { startAge: v })} /></span>}
+                            : <span className="tax-from">from {couple ? `${fn1}'s age` : "age"} <NumberInput className="tax-age" value={p.startAge} onCommit={(v) => upPeriod(p.id, { startAge: v })} /> <em className="tax-yr">≈ {baseYear + Math.max(0, Math.round((Number(p.startAge) || 0) - ectx.age0c1))}</em></span>}
                           {tax.periods.length > 1 && <button className="rec-del" onClick={() => rmPeriod(p.id)}><Trash2 size={14} /></button>}
                         </div>
                         <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "blank")}>Blank</button></div>
@@ -1239,7 +1291,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 <div className="head-toggles">
                   <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
                   <div className="view-seg"><button className={moneyMode === "real" ? "on" : ""} onClick={() => setMoneyMode("real")}>Today's {sym}</button><button className={moneyMode === "nominal" ? "on" : ""} onClick={() => setMoneyMode("nominal")}>Future {sym}</button></div>
-                  <button className="goal-btn" onClick={() => setGoalOpen(true)}><Target size={14} /> Goal-seek</button>
+                  <button className="goal-btn" onClick={() => setGoalOpen(true)}><Target size={14} /> What if…</button>
                   <button className={`goal-btn ${stress || ci ? "on" : ""}`} onClick={() => setStressOpen(true)}><AlertTriangle size={14} /> Stress test</button>
                 </div>
               )}
@@ -1252,6 +1304,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             {(eventList.length > 0 || annotations.length > 0 || !present) && (
               <div className="chart-events">
                 {eventList.map((e, i) => <span key={i} className="evchip"><i style={{ color: e.color }} />{e.label}<b className="num">{e.year}</b></span>)}
+                {payoutEvents.map((e, i) => <span key={`p${i}`} className="evchip inflow" style={{ borderColor: e.color }}><i style={{ color: e.color }} />{e.label}<b className="num">{e.year}</b></span>)}
                 {annotations.map((a, i) => (present
                   ? <span key={a.id} className="evchip note" style={{ borderColor: noteColor(i) }}><FileText size={11} color={noteColor(i)} />{a.text || "Note"}<b className="num">{a.year}</b></span>
                   : <span key={a.id} className="evchip note" style={{ borderColor: noteColor(i) }}><FileText size={11} color={noteColor(i)} /><input className="note-txt" value={a.text} placeholder="note…" onChange={(e) => upAnnotation(a.id, { text: e.target.value })} /><input className="note-yr num" type="number" value={a.year} onChange={(e) => upAnnotation(a.id, { year: e.target.value })} /><button className="note-x" onClick={() => rmAnnotation(a.id)}>×</button></span>))}
@@ -1262,7 +1315,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
               <div className="stress-bar">
                 <span className="stress-tag"><AlertTriangle size={12} /> {stressImpact.label}</span>
                 <span className="stress-impact">{stressImpact.stressAge ? `funds run short at ${stressImpact.stressAge}` : "still funded for life"}{stressImpact.baseAge !== stressImpact.stressAge ? ` · base ${stressImpact.baseAge ?? "fully funded"}` : ""}</span>
-                <button className="wi-reset" onClick={() => setStress(null)}>Clear</button>
+                <button className="wi-reset" onClick={() => { setStress(null); setCi(null); }}>Clear</button>
               </div>
             )}
             {!present && (
@@ -1291,6 +1344,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {kpis.depYear && <ReferenceLine x={kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
+                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
                   {showComposition
                     ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey="netWorth" stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
@@ -1309,6 +1363,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 <span><i style={{ background: t.amber }} /> Drawn from savings</span>
                 <span><i style={{ background: t.red }} /> Shortfall</span>
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
+                {hasContrib && <span><i className="line-key dash" style={{ borderTopColor: t.mid }} /> + savings/contributions</span>}
               </div>
             </div>
             <div className="chart-cash">
@@ -1324,6 +1379,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <Bar dataKey="coveredBySavings" stackId="mio" fill={t.amber} fillOpacity={0.85} isAnimationActive={false} />
                   <Bar dataKey="uncovered" stackId="mio" fill={t.red} fillOpacity={0.9} isAnimationActive={false} radius={[2, 2, 0, 0]} />
                   <Line type="monotone" dataKey="expenditure" stroke={t.line} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  {hasContrib && <Line type="monotone" dataKey="outgoings" stroke={t.mid} strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -1331,35 +1387,44 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
         </main>
         {goalOpen && goal && (() => {
           const ret1 = Number(profile.client1.retirementAge) || 0;
+          const m = (v) => fmtFull(v, cur);
           const cards = [];
-          // Growth
-          if (goal.growth === null) cards.push({ Icon: TrendingUp, label: "Investment return", verdict: "no", text: "Even a very high return can't fully fund this plan — the gap is structural. Look at spending or retirement age instead." });
-          else if (goal.fundedNow) cards.push({ Icon: TrendingUp, label: "Investment return", verdict: "head", text: goal.growthCapped ? "Returns could fall by more than 12 percentage points and the plan would still last for life — a large cushion." : `Returns could fall by up to ${Math.abs(goal.growth).toFixed(1)} percentage points and the plan would still last for life.` });
-          else cards.push({ Icon: TrendingUp, label: "Investment return", verdict: "need", text: `Returns need to be about ${goal.growth.toFixed(1)} percentage points higher across the board to fully fund the plan (e.g. a 5% assumption becomes ~${(5 + goal.growth).toFixed(1)}%).` });
-          // Retirement
-          if (goal.retire === null) cards.push({ Icon: User, label: "Retirement age", verdict: "no", text: "Working longer alone doesn't close the gap within 25 years — combine with spending or returns." });
-          else if (goal.fundedNow) cards.push({ Icon: User, label: "Retirement age", verdict: goal.retire < 0 ? "head" : "need", text: goal.retire < 0 ? `Retirement could come up to ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} earlier${couple ? "" : ` (at ${ret1 + goal.retire})`} and still last for life.` : "Retiring earlier than planned would open a gap — the current age is about the earliest that works." });
-          else cards.push({ Icon: User, label: "Retirement age", verdict: "need", text: `Working about ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} fully funds the plan.` });
-          // Spend
-          if (goal.spend === null) cards.push({ Icon: Receipt, label: "Annual spending", verdict: "no", text: "The plan can't be funded even on a much-reduced budget — the income/asset base is the constraint." });
-          else if (goal.fundedNow) { const pct = Math.round((goal.spend - 1) * 100); cards.push({ Icon: Receipt, label: "Annual spending", verdict: "head", text: pct >= 300 ? "Spending could rise very substantially and the plan would still last — a large surplus." : `Spending could rise by about ${pct}% and the plan would still last for life.` }); }
-          else { const pct = Math.round((1 - goal.spend) * 100); cards.push({ Icon: Receipt, label: "Annual spending", verdict: "need", text: `Spending needs to drop by about ${pct}% to fully fund the plan.` }); }
+          if (goal.fundedNow) {
+            const pctMore = goal.spend != null ? Math.round((goal.spend - 1) * 100) : null;
+            if (goal.maxSpend != null && goal.curSpend > 0) cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && pctMore < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.` });
+            else cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Spending could rise by about ${pctMore}% and the plan would still last for life.` });
+            if (goal.retire != null && goal.retire < 0) cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life.` });
+            else cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works — retiring sooner would open a gap.` });
+            if (goal.growthCapped) cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: "Returns could fall by more than 12 percentage points across the board and the plan would still last — a large cushion." });
+            else if (goal.growth != null) cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: `Returns could be up to ${Math.abs(goal.growth).toFixed(1)} percentage points lower across the board and the plan would still last for life.` });
+            if (goal.maxOneOff != null) cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase?", text: goal.maxOneOff >= 5000000 ? "Even a very large one-off purchase today leaves the plan funded for life." : `A one-off of about ${m(goal.maxOneOff)} today and the plan would still last for life.` });
+            if (goal.maxMonthly != null) cards.push({ Icon: Receipt, verdict: "head", q: "Could I take on a new monthly cost?", text: goal.maxMonthly >= 50000 ? "A substantial new monthly commitment would be affordable." : `Up to about ${m(goal.maxMonthly)} a month extra — a new premium, rent or commitment — and still funded for life.` });
+          } else {
+            if (goal.spend != null) cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${Math.round((1 - goal.spend) * 100)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fully fund the plan.` });
+            else cards.push({ Icon: Receipt, verdict: "no", q: "How much would I need to cut spending?", text: "The plan can't be funded even on a much-reduced budget — the income and asset base is the constraint." });
+            if (goal.retire != null) cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `About ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} fully funds the plan.` });
+            else cards.push({ Icon: User, verdict: "no", q: "Would working longer fix it?", text: "Working longer alone doesn't close the gap within 25 years — it needs combining with spending or returns." });
+            if (goal.growth != null) cards.push({ Icon: TrendingUp, verdict: "need", q: "What return would make this work?", text: `Returns need to be about ${goal.growth.toFixed(1)} percentage points higher across the board (e.g. a 5% assumption becomes ~${(5 + goal.growth).toFixed(1)}%).` });
+            else cards.push({ Icon: TrendingUp, verdict: "no", q: "What return would make this work?", text: "Even a very high return can't fully fund this plan — the gap is structural." });
+          }
+          cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.` });
+          cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — worth planning for longevity." });
           return (
             <div className="modal-scrim" onClick={() => setGoalOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-head">
-                  <div><div className="modal-title">Goal-seek</div><div className="modal-sub">{goal.fundedNow ? "This plan is fully funded. Here's the headroom on each lever." : "This plan runs short. Here's what closes the gap on each lever."}</div></div>
+                  <div><div className="modal-title">What if I asked…</div><div className="modal-sub">{goal.fundedNow ? "This plan is fully funded. Here's what the client can ask — and the answer the numbers give." : "This plan runs short. Here's what the client tends to ask — and what would close the gap."}</div></div>
                   <button className="icon-btn" onClick={() => setGoalOpen(false)}><XCircle size={18} /></button>
                 </div>
                 <div className="goal-cards">
                   {cards.map((c, i) => (
                     <div key={i} className={`goal-card goal-${c.verdict}`}>
-                      <div className="goal-card-head"><c.Icon size={15} /> {c.label}</div>
+                      <div className="goal-card-head"><c.Icon size={15} /> {c.q}</div>
                       <div className="goal-card-text">{c.text}</div>
                     </div>
                   ))}
                 </div>
-                <div className="modal-foot">Each answer changes one lever at a time, holding everything else fixed. Use the what-if sliders to explore combinations live.</div>
+                <div className="modal-foot">Each answer changes one lever at a time, holding everything else fixed, and tests "funded for life" (no shortfall in any year). Use the what-if sliders to explore combinations live.</div>
               </div>
             </div>
           );
@@ -1459,8 +1524,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <h2 className="rep-h2">Projected net worth</h2>
                   <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.</p>
                   <div className="rep-chart">
-                    <ResponsiveContainer width="100%" height={340}>
-                      <ComposedChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                    <ComposedChart width={700} height={330} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
                         <CartesianGrid stroke="#eceff3" vertical={false} />
                         <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
                         <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
@@ -1470,7 +1534,6 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                         {markers.retC1 && <ReferenceLine x={markers.retC1} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
                         {markers.retC2 && <ReferenceLine x={markers.retC2} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
                       </ComposedChart>
-                    </ResponsiveContainer>
                   </div>
                   <div className="rep-legend">
                     {legendTypes.map((ty) => <span key={ty}><i style={{ background: typeSwatch(ty) }} /> {TYPE_LABEL[ty]}</span>)}
@@ -1484,8 +1547,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <h2 className="rep-h2">Money in versus money out</h2>
                   <p className="rep-p">Annual income by source against total spending (the line). Where spending exceeds income, the shortfall is drawn from savings.</p>
                   <div className="rep-chart">
-                    <ResponsiveContainer width="100%" height={340}>
-                      <ComposedChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                    <ComposedChart width={700} height={330} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
                         <CartesianGrid stroke="#eceff3" vertical={false} />
                         <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
                         <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
@@ -1493,14 +1555,15 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                         <Bar dataKey="coveredBySavings" stackId="mio" fill="#e0a23a" fillOpacity={0.85} isAnimationActive={false} />
                         <Bar dataKey="uncovered" stackId="mio" fill="#d64545" fillOpacity={0.9} isAnimationActive={false} />
                         <Line type="monotone" dataKey="expenditure" stroke="#161b22" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+                        {hasContrib && <Line type="monotone" dataKey="outgoings" stroke="#5b6573" strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                       </ComposedChart>
-                    </ResponsiveContainer>
                   </div>
                   <div className="rep-legend">
                     <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                     <span><i style={{ background: "#e0a23a" }} /> Drawn from savings</span>
                     <span><i style={{ background: "#d64545" }} /> Shortfall</span>
                     <span><i className="rep-solid" /> Total spending</span>
+                    {hasContrib && <span><i className="rep-dash" /> + savings/contributions</span>}
                   </div>
                 </section>
 
@@ -1663,6 +1726,7 @@ const CSS = `
 .tax-label-in{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:7px 10px;font-size:13px;font-weight:600;font-family:inherit;}
 .tax-label-in:focus{outline:none;border-color:var(--accent);}
 .tax-from{font-size:11.5px;color:var(--mid);white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
+.tax-yr{font-style:normal;font-size:10.5px;color:var(--low);}
 .tax-age{width:52px;text-align:center;background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:7px;padding:5px 6px;font-size:12.5px;}
 .tax-presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--low);}
 .tax-presets button{border:1px solid var(--border);background:var(--bg);color:var(--mid);font-family:inherit;font-size:11px;font-weight:600;padding:4px 9px;border-radius:7px;cursor:pointer;}
@@ -1770,6 +1834,7 @@ const CSS = `
 .evchip i{width:3px;height:13px;border-radius:0;flex:none;background:repeating-linear-gradient(to bottom, currentColor 0 3px, transparent 3px 6px);}
 .evchip b{color:var(--ink);font-weight:600;}
 .evchip.note{border-style:dashed;color:var(--mid);gap:5px;}
+.evchip.inflow{background:color-mix(in srgb, var(--green) 9%, transparent);}
 .note-txt{border:none;background:transparent;color:var(--ink);font-family:inherit;font-size:11px;width:90px;outline:none;}
 .note-yr{border:none;background:transparent;color:var(--mid);font-family:inherit;font-size:11px;width:46px;outline:none;-moz-appearance:textfield;}
 .note-yr::-webkit-outer-spin-button,.note-yr::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
@@ -1816,11 +1881,13 @@ const CSS = `
 .modal-sub{font-size:12.5px;color:var(--mid);margin-top:2px;}
 .goal-cards{display:flex;flex-direction:column;gap:10px;}
 .goal-card{border:1px solid var(--border);border-left-width:3px;border-radius:10px;padding:12px 14px;background:var(--bg);}
-.goal-card-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:var(--ink);margin-bottom:5px;}
+.goal-card-head{display:flex;align-items:flex-start;gap:8px;font-size:12px;font-weight:700;color:var(--ink);margin-bottom:5px;line-height:1.35;}
+.goal-card-head svg{flex:none;margin-top:1px;}
 .goal-card-text{font-size:13px;line-height:1.5;color:var(--mid);}
 .goal-head{border-left-color:var(--green);}
 .goal-need{border-left-color:var(--amber);}
 .goal-no{border-left-color:var(--red);}
+.goal-info{border-left-color:var(--low);}
 .modal-foot{font-size:11.5px;color:var(--low);margin-top:15px;line-height:1.45;border-top:1px solid var(--border);padding-top:12px;}
 .ci-block{margin-top:13px;padding:13px 14px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg);}
 .ci-block.on{box-shadow:inset 0 0 0 1px var(--accent);}
