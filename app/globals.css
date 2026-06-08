@@ -9,6 +9,21 @@
   --red: #d64545;
 }
 
+/* Dark mode — the editor publishes data-theme on <html>; the shell follows. */
+[data-theme="dark"] {
+  --bg: #0A0E16;
+  --card: #131A24;
+  --ink: #F2F6FC;
+  --mid: #97A4B9;
+  --low: #5E6C82;
+  --border: rgba(255,255,255,0.10);
+  --accent: hsl(205 90% 60%);
+  --red: hsl(352 80% 64%);
+}
+[data-theme="dark"] .plan-bar { background: #10151F; }
+[data-theme="dark"] .btn { background: #131A24; }
+[data-theme="dark"] .center-screen { color: var(--mid); }
+
 * { box-sizing: border-box; }
 
 html, body {
