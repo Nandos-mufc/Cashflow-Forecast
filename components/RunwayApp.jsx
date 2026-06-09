@@ -1621,7 +1621,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <h2 className="rep-h2" style={{ marginTop: 26 }}>Key assumptions</h2>
                   <table className="rep-table">
                     <tbody>
-                      <tr><td>Inflation</td><td className="r num">{inflation}%</td></tr>
+                      <tr><td>Inflation</td><td className="r num">{assumptions.inflation}%</td></tr>
                       {couple && <tr><td>Surviving partner's spending</td><td className="r num">{assumptions.survivorExpenseFactor}% of joint costs</td></tr>}
                       <tr><td>Tax treatment</td><td className="r">{assumptions.tax && assumptions.tax.enabled ? "Illustrative tax applied (see note)" : "Not applied — figures as entered"}</td></tr>
                       <tr><td>Figures shown in</td><td className="r">{basis}</td></tr>
