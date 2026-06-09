@@ -958,6 +958,9 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     return `${a} · ${b}`;
   };
 
+  // Tooltips use Recharts' native <Tooltip> with custom content (CompTip/FlowTip). Recharts handles
+  // hover detection and positioning internally — this is what keeps chart scanning buttery smooth.
+
   const CompTip = ({ active, payload }) => {
     if (!active || !payload || !payload.length) return null;
     const d = payload[0].payload;
@@ -1001,7 +1004,6 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
       </div>
     );
   };
-
   const cssVars = {
     "--bg": t.bg, "--panel": t.panel, "--rail": t.rail, "--card": t.card, "--border": t.border, "--border-strong": t.borderStrong,
     "--ink": t.ink, "--mid": t.mid, "--low": t.low, "--accent": t.accent, "--accent-soft": t.accentSoft,
@@ -1716,7 +1718,7 @@ function InfoTip({ text }) {
 /*  STYLES                                                            */
 /* ================================================================== */
 const CSS = `
-.app-root{font-family:'Hanken Grotesk',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);height:100%;min-height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
+.app-root{font-family:'Hanken Grotesk',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;overflow:hidden;}
 .app-root *{box-sizing:border-box;}
 .num{font-family:'Hanken Grotesk',ui-sans-serif,sans-serif;font-variant-numeric:tabular-nums;}
 
@@ -1733,10 +1735,10 @@ const CSS = `
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{display:grid;grid-template-columns:204px 360px 1fr;grid-template-rows:1fr;flex:1;min-height:0;height:100%;}
+.app{display:grid;grid-template-columns:204px 360px 1fr;grid-template-rows:1fr;flex:1;min-height:0;height:100%;overflow:hidden;}
 .app.present{grid-template-columns:1fr;}
 
-.rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;height:100%;}
+.rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;min-height:0;height:100%;}
 
 .rail-group{display:flex;flex-direction:column;gap:3px;}
 .rail-item{display:flex;align-items:center;gap:11px;width:100%;background:transparent;border:none;color:var(--mid);padding:9px 11px;border-radius:9px;font-size:13.5px;font-weight:500;cursor:pointer;font-family:inherit;transition:.13s;text-align:left;}
@@ -1839,7 +1841,7 @@ const CSS = `
 .del-row{display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:1px solid var(--border);color:var(--low);border-radius:8px;padding:8px;font-size:12px;font-family:inherit;cursor:pointer;}
 .del-row:hover{color:var(--red);border-color:var(--red);}
 
-.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;overflow:visible;height:100%;}
+.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;min-height:0;overflow:visible;height:100%;}
 .app.present .chartwrap{padding:22px 36px;gap:16px;}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px;box-shadow:var(--shadow);}
@@ -2007,7 +2009,7 @@ const CSS = `
 .summary-bar span{font-size:11px;color:var(--mid);}
 .summary-bar b{font-size:16px;font-weight:600;color:var(--ink);letter-spacing:-0.01em;}
 
-.tip{background:var(--panel);border:1px solid var(--border-strong);border-radius:11px;padding:11px 13px;min-width:230px;max-width:290px;box-shadow:0 12px 36px rgba(15,30,50,.18);}
+.tip{background:var(--panel);border:1px solid var(--border-strong);border-radius:11px;padding:11px 13px;min-width:230px;max-width:290px;max-height:calc(100vh - 24px);overflow-y:auto;box-shadow:0 12px 36px rgba(15,30,50,.18);}
 .tip-head{font-size:12px;color:var(--mid);margin-bottom:8px;}
 .tip-head b{color:var(--ink);font-size:13px;} .tip-yr{color:var(--low);margin-left:6px;}
 .tip-total{display:flex;justify-content:space-between;font-size:13px;color:var(--mid);}
@@ -2039,5 +2041,17 @@ const CSS = `
   .summary-bar{flex-direction:column;gap:8px;}
   .summary-bar div+div{border-left:none;padding-left:0;border-top:1px solid var(--border);padding-top:8px;}
   .topbar-tools .btn-primary span{display:none;}
+}
+
+/* Viewport-height breakpoints — keep charts readable on 13-14" laptops */
+@media (max-height:860px){
+  .chart-main{height:clamp(200px,32vh,380px);}
+  .chart-cash{height:clamp(120px,17vh,200px);}
+  .chartwrap{gap:10px;padding:14px 18px;}
+}
+@media (max-height:720px){
+  .chart-main{height:clamp(170px,28vh,280px);}
+  .chart-cash{height:clamp(100px,15vh,160px);}
+  .chartwrap{gap:8px;padding:10px 14px;}
 }
 `;
