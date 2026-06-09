@@ -873,6 +873,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
+    const liquidAssets = assets.filter((a) => a.type !== "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
     const curSpend = expenses.reduce((s, e) => { const a = Number(e.amount) || 0; if (e.frequency === "monthly") return s + a * 12; if (e.frequency === "annual") return s + a; return s; }, 0); // recurring annual spend (excludes one-offs)
 
     // Growth: percentage points added to every asset's assumed return (monotonic — more is better)
@@ -913,7 +914,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     // Resilience: would the plan still hold if they lived to 100?
     const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
 
-    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, maxOneOff, maxMonthly, to100, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
+    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, maxOneOff, maxMonthly, to100, estateEnd: kpis.endVal, estateEndYear: kpis.endYear, liquidAssets };
   }, [goalOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
@@ -960,6 +961,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const CompTip = ({ active, payload }) => {
     if (!active || !payload || !payload.length) return null;
     const d = payload[0].payload;
+    const yearPayouts = payoutEvents.filter((e) => e.year === d.year);
     return (
       <div className="tip">
         <div className="tip-head"><b className="num">{d.year}</b> <span className="tip-yr">{agesLabel(d)}</span></div>
@@ -968,7 +970,9 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
         {tooltipOrder.map((a) => <div className="tip-row" key={a.id}><span className="tip-name"><i style={{ background: colors[a.id] }} /> {a.name}</span><span className="num">{fmtFull(d[aKey(a.id)] || 0, cur)}</span></div>)}
         {hasProperty && <div className="tip-row tip-sub"><span>Spendable (excl. property)</span><span className="num">{fmtFull(d.investable, cur)}</span></div>}
         {d.debt > 0 && <div className="tip-row"><span className="tip-name">Less: debts</span><span className="num">−{fmtFull(d.debt, cur)}</span></div>}
-        {d.debt > 0 && <div className="tip-total"><span>Net worth</span><b className="num">{fmtFull(d.netWorth, cur)}</b></div>}
+        {d.debt > 0 && <div className="tip-total"><span>Net worth after debts</span><b className="num">{fmtFull(d.netWorth, cur)}</b></div>}
+        {yearPayouts.length > 0 && <><div className="tip-rule" />{yearPayouts.map((e, i) => <div key={i} className="tip-row" style={{ color: t.green }}><span className="tip-name" style={{ color: t.green }}>↑ {e.label}</span><span className="num">received</span></div>)}</>}
+        {d.taxPaid > 0 && <><div className="tip-rule" /><div className="tip-row"><span className="tip-name">Tax on withdrawals</span><span className="num">−{fmtFull(d.taxPaid, cur)}</span></div></>}
       </div>
     );
   };
@@ -976,10 +980,12 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     if (!active || !payload || !payload.length) return null;
     const d = payload[0].payload;
     const net = d.income - d.outgoings;
+    const yearPayouts = payoutEvents.filter((e) => e.year === d.year);
     return (
       <div className="tip">
         <div className="tip-head"><b className="num">{d.year}</b> <span className="tip-yr">{agesLabel(d)}</span></div>
         {incomes.map((i) => (d[iKey(i.id)] > 0 ? <div className="tip-row" key={i.id}><span className="tip-name"><i style={{ background: incColors[i.id] }} /> {i.name}</span><span className="num">{fmtFull(d[iKey(i.id)], cur)}</span></div> : null))}
+        {yearPayouts.map((e, i) => <div key={`p${i}`} className="tip-row" style={{ color: t.green }}><span className="tip-name" style={{ color: t.green }}>↑ {e.label}</span><span className="num">to savings</span></div>)}
         <div className="tip-row tip-sub"><span>Total income</span><span className="num">{fmtFull(d.income, cur)}</span></div>
         {d.coveredBySavings > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.amber }} /> Drawn from savings</span><span className="num">{fmtFull(d.coveredBySavings, cur)}</span></div>}
         {d.uncovered > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.red }} /> Unfunded shortfall</span><span className="num">{fmtFull(d.uncovered, cur)}</span></div>}
@@ -988,9 +994,9 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
         {d.expDiscretionary > 0 && <div className="tip-row"><span className="tip-name">Discretionary spending</span><span className="num">{fmtFull(d.expDiscretionary, cur)}</span></div>}
         {d.premiums > 0 && <div className="tip-row"><span className="tip-name">Protection premiums</span><span className="num">{fmtFull(d.premiums, cur)}</span></div>}
         {d.liabRepay > 0 && <div className="tip-row"><span className="tip-name">Loan repayments</span><span className="num">{fmtFull(d.liabRepay, cur)}</span></div>}
+        {d.taxPaid > 0 && <div className="tip-row" style={{ color: t.amber }}><span className="tip-name">Tax on withdrawals</span><span className="num">{fmtFull(d.taxPaid, cur)}</span></div>}
         <div className="tip-total"><span>Total expenditure</span><b className="num">{fmtFull(d.expenditure, cur)}</b></div>
         {d.contrib > 0 && <><div className="tip-row"><span className="tip-name">Savings / contributions</span><span className="num">{fmtFull(d.contrib, cur)}</span></div><div className="tip-row tip-sub"><span>Total money out</span><span className="num">{fmtFull(d.outgoings, cur)}</span></div></>}
-        {d.taxPaid > 0 && <div className="tip-row"><span className="tip-name">Tax on withdrawals</span><span className="num">{fmtFull(d.taxPaid, cur)}</span></div>}
         <div className="tip-net" style={{ color: net >= 0 ? t.green : t.amber }}>{net >= 0 ? "Surplus " : "Funded by drawdown "}<span className="num">{fmtFull(Math.abs(net), cur)}</span></div>
       </div>
     );
@@ -1339,7 +1345,8 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <XAxis dataKey="year" tick={false} axisLine={false} tickLine={false} height={4} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
-                  <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} />
+                  <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} position={{ y: 10 }} />
+
                   {markers.retC1 && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
@@ -1364,6 +1371,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 <span><i style={{ background: t.red }} /> Shortfall</span>
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
                 {hasContrib && <span><i className="line-key dash" style={{ borderTopColor: t.mid }} /> + savings/contributions</span>}
+                {tax.enabled && <span className="legend-tax-badge">Tax on withdrawals active</span>}
               </div>
             </div>
             <div className="chart-cash">
@@ -1374,7 +1382,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <XAxis dataKey="year" tick={tick} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} />
                   {markers.retC1 && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  <Tooltip content={<FlowTip />} cursor={{ fill: t.grid }} />
+                  <Tooltip content={<FlowTip />} cursor={{ fill: t.grid }} position={{ y: 10 }} />
                   {incomes.map((i) => <Bar key={i.id} dataKey={iKey(i.id)} stackId="mio" fill={incColors[i.id]} fillOpacity={0.9} isAnimationActive={false} />)}
                   <Bar dataKey="coveredBySavings" stackId="mio" fill={t.amber} fillOpacity={0.85} isAnimationActive={false} />
                   <Bar dataKey="uncovered" stackId="mio" fill={t.red} fillOpacity={0.9} isAnimationActive={false} radius={[2, 2, 0, 0]} />
@@ -1389,26 +1397,56 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           const ret1 = Number(profile.client1.retirementAge) || 0;
           const m = (v) => fmtFull(v, cur);
           const cards = [];
+
           if (goal.fundedNow) {
+            // SPENDING
             const pctMore = goal.spend != null ? Math.round((goal.spend - 1) * 100) : null;
-            if (goal.maxSpend != null && goal.curSpend > 0) cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && pctMore < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.` });
-            else cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Spending could rise by about ${pctMore}% and the plan would still last for life.` });
-            if (goal.retire != null && goal.retire < 0) cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life.` });
-            else cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works — retiring sooner would open a gap.` });
-            if (goal.growthCapped) cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: "Returns could fall by more than 12 percentage points across the board and the plan would still last — a large cushion." });
-            else if (goal.growth != null) cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: `Returns could be up to ${Math.abs(goal.growth).toFixed(1)} percentage points lower across the board and the plan would still last for life.` });
-            if (goal.maxOneOff != null) cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase?", text: goal.maxOneOff >= 5000000 ? "Even a very large one-off purchase today leaves the plan funded for life." : `A one-off of about ${m(goal.maxOneOff)} today and the plan would still last for life.` });
-            if (goal.maxMonthly != null) cards.push({ Icon: Receipt, verdict: "head", q: "Could I take on a new monthly cost?", text: goal.maxMonthly >= 50000 ? "A substantial new monthly commitment would be affordable." : `Up to about ${m(goal.maxMonthly)} a month extra — a new premium, rent or commitment — and still funded for life.` });
+            if (goal.maxSpend != null && goal.curSpend > 0)
+              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && pctMore < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.`, note: "Single-lever answer: all other inputs (retirement age, growth rates, contributions) are held constant. Spending is assumed constant over time — if you'd naturally cut back in later retirement, the true ceiling is higher." });
+            else
+              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Spending could rise by about ${pctMore}% and the plan would still last for life.`, note: "All other inputs held constant." });
+
+            // RETIREMENT
+            if (goal.retire != null && goal.retire < 0)
+              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life.`, note: `Assumes spending stays at today's level through retirement (no lifestyle reduction). Income sources (salary ending, pensions starting) follow your plan exactly as entered. If retirement spending is lower, the earliest age could be sooner.` });
+            else
+              cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works given current spending and assets.`, note: "Assumes spending stays unchanged in retirement. If retirement costs are lower, an earlier date may be feasible." });
+
+            // RETURNS
+            if (goal.growthCapped)
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: "Returns could fall by more than 12 percentage points across all assets and the plan would still last — a very large cushion.", note: "Applies a uniform shift to every asset's growth rate simultaneously. Real portfolios vary by asset class." });
+            else if (goal.growth != null)
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: `Returns could be up to ${Math.abs(goal.growth).toFixed(1)} percentage points lower across all assets and the plan would still last for life.`, note: "Applies a uniform downward shift to every asset simultaneously — a blunt but useful stress test. Individual asset underperformance could vary." });
+
+            // ONE-OFF
+            if (goal.maxOneOff != null)
+              cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: goal.maxOneOff >= 5000000 ? `Even a very large one-off purchase today leaves the plan funded for life. Your liquid assets stand at ${m(goal.liquidAssets)}.` : `A one-off of about ${m(goal.maxOneOff)} today and the plan would still last for life. Your liquid assets currently stand at ${m(goal.liquidAssets)}.`, note: "The model draws the amount from your liquid assets (non-property). It does not check whether those assets are accessible or whether selling them triggers tax or penalties. It does not model property, locked pensions, or assets with surrender charges." });
+
+            // MONTHLY
+            if (goal.maxMonthly != null)
+              cards.push({ Icon: Receipt, verdict: "head", q: "Could I take on a new monthly cost?", text: goal.maxMonthly >= 50000 ? "A substantial new monthly commitment would still leave the plan funded for life." : `Up to about ${m(goal.maxMonthly)} a month extra and the plan would still last for life.`, note: "Models a new expense starting today and running to the end of the plan, rising with inflation. It does not account for the cost stopping at a future date (e.g. when school fees end or a mortgage clears). A permanent test — not a temporary one." });
+
           } else {
-            if (goal.spend != null) cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${Math.round((1 - goal.spend) * 100)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fully fund the plan.` });
-            else cards.push({ Icon: Receipt, verdict: "no", q: "How much would I need to cut spending?", text: "The plan can't be funded even on a much-reduced budget — the income and asset base is the constraint." });
-            if (goal.retire != null) cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `About ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} fully funds the plan.` });
-            else cards.push({ Icon: User, verdict: "no", q: "Would working longer fix it?", text: "Working longer alone doesn't close the gap within 25 years — it needs combining with spending or returns." });
-            if (goal.growth != null) cards.push({ Icon: TrendingUp, verdict: "need", q: "What return would make this work?", text: `Returns need to be about ${goal.growth.toFixed(1)} percentage points higher across the board (e.g. a 5% assumption becomes ~${(5 + goal.growth).toFixed(1)}%).` });
-            else cards.push({ Icon: TrendingUp, verdict: "no", q: "What return would make this work?", text: "Even a very high return can't fully fund this plan — the gap is structural." });
+            // NOT FUNDED — what would fix it
+            if (goal.spend != null)
+              cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${Math.round((1 - goal.spend) * 100)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fully fund the plan.`, note: "All other inputs held constant. Reducing discretionary spending while keeping essentials is more realistic — the model applies the cut uniformly." });
+            else
+              cards.push({ Icon: Receipt, verdict: "no", q: "How much would I need to cut spending?", text: "The plan can't be funded even on a much-reduced budget — the income and asset base is the constraint.", note: "This points to an income or asset shortfall, not a spending problem." });
+
+            if (goal.retire != null)
+              cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `About ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} fully funds the plan.`, note: "Assumes spending unchanged through retirement. Working longer adds income and delays drawdown — both help. If only one partner works, the gain is proportionally smaller." });
+            else
+              cards.push({ Icon: User, verdict: "no", q: "Would working longer fix it?", text: "Working longer alone doesn't close the gap within 25 years — it needs combining with lower spending or higher returns.", note: "The structural gap is too large for additional working years alone to resolve." });
+
+            if (goal.growth != null)
+              cards.push({ Icon: TrendingUp, verdict: "need", q: "What return would make this work?", text: `Returns need to be about ${goal.growth.toFixed(1)} percentage points higher across all assets to fully fund the plan (e.g. 5% becomes ~${(5 + goal.growth).toFixed(1)}%).`, note: "Applies a uniform uplift to all assets simultaneously. Chasing higher returns means accepting higher risk — discuss suitability before adjusting growth assumptions." });
+            else
+              cards.push({ Icon: TrendingUp, verdict: "no", q: "What return would make this work?", text: "Even a very high return can't fully fund this plan — the gap is structural.", note: "The deficit is too large to be closed by returns alone. Look at contributions, spending, or the retirement date." });
           }
-          cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.` });
-          cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — worth planning for longevity." });
+
+          // ALWAYS SHOWN
+          cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end of the plan (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.`, note: "In today's money (real terms). Before inheritance tax or estate costs. Based on current assumptions with no changes — actual estate will depend on actual returns and spending." });
+          cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — longevity is a real risk worth planning for.", note: "All inputs unchanged. Spending and growth rates are held constant to age 100, which may overstate costs (older retirees often spend less) or understate them (long-term care). Consider this a conservative longevity stress test." });
           return (
             <div className="modal-scrim" onClick={() => setGoalOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1421,10 +1459,11 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                     <div key={i} className={`goal-card goal-${c.verdict}`}>
                       <div className="goal-card-head"><c.Icon size={15} /> {c.q}</div>
                       <div className="goal-card-text">{c.text}</div>
+                      {c.note && <div className="goal-card-note">{c.note}</div>}
                     </div>
                   ))}
                 </div>
-                <div className="modal-foot">Each answer changes one lever at a time, holding everything else fixed, and tests "funded for life" (no shortfall in any year). Use the what-if sliders to explore combinations live.</div>
+                <div className="modal-foot">Each answer moves one lever at a time — everything else is held constant. Read the small-print on each card before quoting the number to a client.</div>
               </div>
             </div>
           );
@@ -1694,10 +1733,11 @@ const CSS = `
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{display:grid;grid-template-columns:204px 360px 1fr;flex:1;min-height:0;}
+.app{display:grid;grid-template-columns:204px 360px 1fr;grid-template-rows:1fr;flex:1;min-height:0;height:100%;}
 .app.present{grid-template-columns:1fr;}
 
-.rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;}
+.rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;height:100%;}
+
 .rail-group{display:flex;flex-direction:column;gap:3px;}
 .rail-item{display:flex;align-items:center;gap:11px;width:100%;background:transparent;border:none;color:var(--mid);padding:9px 11px;border-radius:9px;font-size:13.5px;font-weight:500;cursor:pointer;font-family:inherit;transition:.13s;text-align:left;}
 .rail-item:hover{background:var(--accent-soft);color:var(--ink);}
@@ -1711,7 +1751,7 @@ const CSS = `
 .tab{display:flex;align-items:center;gap:6px;white-space:nowrap;background:var(--bg);border:1px solid var(--border);color:var(--mid);padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:500;font-family:inherit;cursor:pointer;}
 .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
 
-.editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;}
+.editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;height:100%;}
 .ed-body{padding:18px 16px;display:flex;flex-direction:column;gap:13px;}
 .ed-head{display:flex;align-items:center;justify-content:space-between;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
@@ -1799,7 +1839,7 @@ const CSS = `
 .del-row{display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:1px solid var(--border);color:var(--low);border-radius:8px;padding:8px;font-size:12px;font-family:inherit;cursor:pointer;}
 .del-row:hover{color:var(--red);border-color:var(--red);}
 
-.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;overflow-y:auto;min-height:0;position:sticky;top:0;align-self:start;max-height:100vh;}
+.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;overflow:visible;height:100%;}
 .app.present .chartwrap{padding:22px 36px;gap:16px;}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px;box-shadow:var(--shadow);}
@@ -1827,6 +1867,8 @@ const CSS = `
 .legend span{display:flex;align-items:center;gap:6px;}
 .legend i{width:10px;height:10px;border-radius:3px;}
 .legend i.line-key{width:16px;height:0;border-radius:0;border-top:2px solid currentColor;background:transparent;}
+.legend i.line-key.dash{border-top-style:dashed;}
+.legend-tax-badge{font-size:10px;background:color-mix(in srgb,var(--amber) 15%,transparent);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent);border-radius:5px;padding:1px 7px;font-weight:600;}
 .legend i.line-key.dash{border-top-style:dashed;}
 .chart-main{height:clamp(240px,40vh,460px);margin-top:6px;}
 .chart-events{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0;}
@@ -1884,6 +1926,7 @@ const CSS = `
 .goal-card-head{display:flex;align-items:flex-start;gap:8px;font-size:12px;font-weight:700;color:var(--ink);margin-bottom:5px;line-height:1.35;}
 .goal-card-head svg{flex:none;margin-top:1px;}
 .goal-card-text{font-size:13px;line-height:1.5;color:var(--mid);}
+.goal-card-note{font-size:11px;line-height:1.5;color:var(--low);margin-top:7px;padding-top:7px;border-top:1px solid var(--border);}
 .goal-head{border-left-color:var(--green);}
 .goal-need{border-left-color:var(--amber);}
 .goal-no{border-left-color:var(--red);}
@@ -1964,7 +2007,7 @@ const CSS = `
 .summary-bar span{font-size:11px;color:var(--mid);}
 .summary-bar b{font-size:16px;font-weight:600;color:var(--ink);letter-spacing:-0.01em;}
 
-.tip{background:var(--panel);border:1px solid var(--border-strong);border-radius:11px;padding:11px 13px;min-width:230px;box-shadow:0 12px 36px rgba(15,30,50,.18);}
+.tip{background:var(--panel);border:1px solid var(--border-strong);border-radius:11px;padding:11px 13px;min-width:230px;max-width:290px;box-shadow:0 12px 36px rgba(15,30,50,.18);}
 .tip-head{font-size:12px;color:var(--mid);margin-bottom:8px;}
 .tip-head b{color:var(--ink);font-size:13px;} .tip-yr{color:var(--low);margin-left:6px;}
 .tip-total{display:flex;justify-content:space-between;font-size:13px;color:var(--mid);}
