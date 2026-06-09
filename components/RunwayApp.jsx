@@ -1475,7 +1475,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           const ownerLabel = (o) => (o === "joint" ? "Joint" : o === "client2" ? fn2 : fn1);
           const insuredLabel = (o) => (o === "client2" ? fn2 : fn1);
           const anchorTxt = (a) => { if (!a) return "—"; if (a.mode === "now") return "Start"; if (a.mode === "retirement") return "Retirement"; if (a.mode === "end") return "End of plan"; if (a.mode === "age") return `Age ${a.age}`; return "—"; };
-          const escTxt = (it) => (it.escalation === "inflation" ? `Inflation (${inflation}%)` : it.escalation === "custom" ? `${it.customEsc || 0}%` : "None");
+          const escTxt = (it) => (it.escalation === "inflation" ? `Inflation (${assumptions.inflation}%)` : it.escalation === "custom" ? `${it.customEsc || 0}%` : "None");
           const freqTxt = (it) => (it.frequency === "monthly" ? "Monthly" : it.frequency === "oneoff" ? "One-off" : it.frequency === "everyN" ? `Every ${it.everyYears || 1} yrs` : "Annual");
           const m = (v) => fmtFull(v, cur);
           const verdictText = kpis.depletionAge === null
