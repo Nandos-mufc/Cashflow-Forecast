@@ -123,6 +123,28 @@ const clampDeathAge = (v, minAge, maxAge) => Math.min(maxAge, Math.max(minAge, M
 t("PG death age clamps below", clampDeathAge(30, 50, 92) === 50);
 t("PG death age clamps above", clampDeathAge(120, 50, 92) === 92);
 
+/* ---------------- tax engine (mirrors of the in-component helpers) ---------------- */
+// Band math with PA, sorted-band tolerance, and gross-up round trips.
+const bandUpper = (b) => (b.upTo == null || b.upTo === "" ? Infinity : Number(b.upTo));
+const incomeTaxOf = (income, period) => {
+  if (!period || !period.bands || !period.bands.length) return 0;
+  const pa = Number(period.personalAllowance) || 0;
+  const sorted = [...period.bands].sort((a, b) => bandUpper(a) - bandUpper(b));
+  let tax = 0, lower = pa;
+  for (const b of sorted) {
+    const upper = bandUpper(b);
+    if (income > lower) { const amt = Math.min(income, upper) - lower; if (amt > 0) tax += (amt * (Number(b.rate) || 0)) / 100; }
+    lower = upper;
+    if (income <= upper) break;
+  }
+  return tax;
+};
+const ukP = { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }] };
+t("TAX below allowance = 0", incomeTaxOf(12000, ukP) === 0);
+t("TAX £60k spans bands = 11432", Math.abs(incomeTaxOf(60000, ukP) - 11432) < 0.01);
+t("TAX unsorted bands identical", Math.abs(incomeTaxOf(60000, { ...ukP, bands: [ukP.bands[2], ukP.bands[0], ukP.bands[1]] }) - incomeTaxOf(60000, ukP)) < 0.01);
+t("TAX top band exact", Math.abs(incomeTaxOf(200000, ukP) - (0.2 * (50270 - 12570) + 0.4 * (125140 - 50270) + 0.45 * (200000 - 125140))) < 0.01);
+
 /* ---------------- compliance language scan ---------------- */
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, "..", "components", "RunwayApp.jsx"), "utf8");
