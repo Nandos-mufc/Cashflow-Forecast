@@ -642,6 +642,20 @@ const ExpandCtl = ({ items, open, onExpand, onCollapse }) => {
 
 /* ================================================================== */
 /*  STREAM ROW (income / expense)                                     */
+/* Quick delete from a collapsed row: first click arms (turns red, "Sure?"), second confirms.
+   Disarms itself after 2.2s — protects against misclicks without a clunky modal. */
+function QuickDel({ onConfirm, label = "Remove" }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => { if (!armed) return; const t = setTimeout(() => setArmed(false), 2200); return () => clearTimeout(t); }, [armed]);
+  return (
+    <span role="button" tabIndex={0} className={`qdel ${armed ? "armed" : ""}`} title={armed ? "Click again to confirm" : label}
+      onClick={(e) => { e.stopPropagation(); if (armed) onConfirm(); else setArmed(true); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); if (armed) onConfirm(); else setArmed(true); } }}>
+      {armed ? <em>Sure?</em> : <Trash2 size={13} />}
+    </span>
+  );
+}
+
 /* ================================================================== */
 function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expanded, onToggle, onChange, onRemove }) {
   const per = { weekly: "/wk", monthly: "/mo", annual: "/yr", oneoff: "one-off", everyN: `/${item.everyYears}yr` }[item.frequency];
@@ -649,13 +663,14 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
   const ownerName = (ownerOpts.find((o) => o.value === owner) || {}).label || "";
   return (
     <div className={`rec ${expanded ? "open" : ""}`}>
-      <button className="rec-bar" onClick={onToggle}>
+      <div className="rec-bar" role="button" tabIndex={0} onClick={onToggle} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
         <span className="rec-name-r">{item.name || "Untitled"}</span>
         {couple && <span className="owner-chip">{ownerName}</span>}
         {kind === "expense" && <span className={`prio ${item.priority}`}>{item.priority === "essential" ? "Ess" : "Disc"}</span>}
         <span className="rec-sum num">{sym}{(Number(item.amount) || 0).toLocaleString()} <em>{per}</em></span>
+        <QuickDel onConfirm={onRemove} />
         <ChevronDown size={15} className="chev" />
-      </button>
+      </div>
       {expanded && (
         <div className="rec-body">
           <label className="flbl">Name</label>
@@ -1172,9 +1187,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const upInc = patch(setIncomes), rmInc = rmFn(setIncomes);
   const upExp = patch(setExpenses), rmExp = rmFn(setExpenses);
   const upLiab = patch(setLiabilities), rmLiab = rmFn(setLiabilities);
-  const addLiab = () => addOpen(setLiabilities, { id: uid(), name: "New liability", type: "mortgage", balance: 0, rate: 4, monthlyPayment: 0, owner: couple ? "joint" : "client1" });
+  const addLiab = () => addOpen(setLiabilities, { id: uid(), name: "New liability", type: "mortgage", balance: 0, rate: 4, monthlyPayment: 0, owner: couple ? "joint" : "client1" }, liabilities);
   const upPol = patch(setProtection), rmPol = rmFn(setProtection);
-  const addPol = () => addOpen(setProtection, { id: uid(), name: "New policy", insured: "client1", sumAssured: 250000, premium: 50, coverToAge: 90 });
+  const addPol = () => addOpen(setProtection, { id: uid(), name: "New policy", insured: "client1", sumAssured: 250000, premium: 50, coverToAge: 90 }, protection);
   const upContrib = (id, p) => setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, contribution: { ...a.contribution, ...p } } : a)));
   const upClient = (which, p) => setProfile((prev) => ({ ...prev, [which]: { ...prev[which], ...p } }));
   const addAnnotation = () => setAnnotations((a) => [...a, { id: uid(), year: baseYear + 5, text: "" }]);
@@ -1191,6 +1206,15 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const addBand = (pid) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: [...p.bands, { upTo: "", rate: 0 }] }); };
   const rmBand = (pid, idx) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: p.bands.filter((_, i) => i !== idx) }); };
   const toggleOpen = (id) => setOpen((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  // Accordion behaviour: opening a row collapses its siblings, so the section never stacks up.
+  // Closing just closes. Expand All still opens everything for side-by-side work.
+  const openSolo = (id, siblings) => setOpen((s) => {
+    const n = new Set(s);
+    if (n.has(id)) { n.delete(id); return n; }
+    (siblings || []).forEach((x) => n.delete(x.id));
+    n.add(id);
+    return n;
+  });
   const expandAll = (items) => setOpen((s) => { const n = new Set(s); items.forEach((x) => n.add(x.id)); return n; });
   const collapseAll = (items) => setOpen((s) => { const n = new Set(s); items.forEach((x) => n.delete(x.id)); return n; });
 
@@ -1226,10 +1250,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   }, [assets, riskProfiles, riskRateOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
   const riskOwnerKeys = couple ? ["client1", "client2", "joint"] : ["client1"];
   const riskOwnerLabel = (k) => (k === "joint" ? "Joint assets" : (profile[k].name || (k === "client1" ? "Client 1" : "Client 2")));
-  const addOpen = (setter, rec) => { setter((p) => [...p, rec]); setOpen((s) => new Set(s).add(rec.id)); };
-  const addAsset = () => addOpen(setAssets, { id: uid(), name: "New asset", type: "investment", value: 0, growthRate: 5, drawdown: true, owner: couple ? "joint" : "client1", contribution: contribDefault() });
-  const addInc = () => addOpen(setIncomes, { id: uid(), name: "New income", amount: 0, frequency: "annual", escalation: "none", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, owner: "client1", onDeath: deathDefault() });
-  const addExp = () => addOpen(setExpenses, { id: uid(), name: "New expense", amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "essential", owner: "joint" });
+  const addOpen = (setter, rec, siblings) => {
+    setter((p) => [...p, rec]);
+    setOpen((s) => { const n = new Set(s); (siblings || []).forEach((x) => n.delete(x.id)); n.add(rec.id); return n; });
+    // bring the new record into view once it has rendered
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const ed = document.querySelector(".editor");
+      if (ed) ed.scrollTo({ top: ed.scrollHeight, behavior: "smooth" });
+    }));
+  };
+  const addAsset = () => addOpen(setAssets, { id: uid(), name: "New asset", type: "investment", value: 0, growthRate: 5, drawdown: true, owner: couple ? "joint" : "client1", contribution: contribDefault() }, assets);
+  const addInc = () => addOpen(setIncomes, { id: uid(), name: "New income", amount: 0, frequency: "annual", escalation: "none", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, owner: "client1", onDeath: deathDefault() }, incomes);
+  const addExp = () => addOpen(setExpenses, { id: uid(), name: "New expense", amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "essential", owner: "joint" }, expenses);
 
   const chartMargin = { top: 8, right: 14, left: 2, bottom: 0 };
   const axisWidth = 54;
@@ -1453,19 +1485,21 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             {section === "assets" && (
               <div className="ed-body">
                 <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
+                {assets.length === 0 && <p className="empty-note">No assets yet. Add savings, investments, pensions or property — the chart builds from here.</p>}
                 {assets.map((a) => {
                   const expanded = open.has(a.id);
                   const realRet = ((Number(a.growthRate) || 0) - (Number(assumptions.inflation) || 0)).toFixed(1);
                   const ownerName = (ownerOpts.find((o) => o.value === (a.owner || "client1")) || {}).label || "";
                   return (
                     <div className={`rec ${expanded ? "open" : ""}`} key={a.id}>
-                      <button className="rec-bar" onClick={() => toggleOpen(a.id)}>
+                      <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(a.id, assets)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(a.id, assets); } }}>
                         <span className="swatch" style={{ background: colors[a.id] }} />
                         <span className="rec-name-r">{a.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{ownerName}</span>}
                         <span className="rec-sum num">{sym}{(Number(a.value) || 0).toLocaleString()}</span>
+                        <QuickDel onConfirm={() => rmAsset(a.id)} />
                         <ChevronDown size={15} className="chev" />
-                      </button>
+                      </div>
                       {expanded && (
                         <div className="rec-body">
                           <label className="flbl">Name</label>
@@ -1509,14 +1543,16 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             {section === "income" && (
               <div className="ed-body">
                 <div className="ed-head"><h2 className="ed-title">Income</h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
-                {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => toggleOpen(i.id)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
+                {incomes.length === 0 && <p className="empty-note">No income yet. Add salary, rental, dividends or pension income with start and end dates.</p>}
+                {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => openSolo(i.id, incomes)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
                 <p className="ed-hint">End salary at "Retirement" and it tracks each person's retirement age. {couple ? "Set what happens to each income on that person's death." : ""}</p>
               </div>
             )}
             {section === "expenditure" && (
               <div className="ed-body">
                 <div className="ed-head"><h2 className="ed-title">Expenditure</h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
-                {expenses.map((e) => <StreamRow key={e.id} item={e} sym={sym} kind="expense" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(e.id)} onToggle={() => toggleOpen(e.id)} onChange={(p) => upExp(e.id, p)} onRemove={() => rmExp(e.id)} />)}
+                {expenses.length === 0 && <p className="empty-note">No spending yet. Add essential and lifestyle costs — the gap between income and spending drives the whole plan.</p>}
+                {expenses.map((e) => <StreamRow key={e.id} item={e} sym={sym} kind="expense" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(e.id)} onToggle={() => openSolo(e.id, expenses)} onChange={(p) => upExp(e.id, p)} onRemove={() => rmExp(e.id)} />)}
                 <p className="ed-hint">One-off and "every N years" cover ad-hoc costs. {couple ? "Joint costs step down to the survivor rate after a death; personal costs cease." : ""}</p>
               </div>
             )}
@@ -1529,13 +1565,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   const ownerName = (ownerOpts.find((o) => o.value === (L.owner || "client1")) || {}).label || "";
                   return (
                     <div className={`rec ${expanded ? "open" : ""}`} key={L.id}>
-                      <button className="rec-bar" onClick={() => toggleOpen(L.id)}>
+                      <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(L.id, liabilities)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(L.id, liabilities); } }}>
                         <span className="swatch" style={{ background: t.red }} />
                         <span className="rec-name-r">{L.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{ownerName}</span>}
                         <span className="rec-sum num">−{sym}{(Number(L.balance) || 0).toLocaleString()}</span>
+                        <QuickDel onConfirm={() => rmLiab(L.id)} />
                         <ChevronDown size={15} className="chev" />
-                      </button>
+                      </div>
                       {expanded && (
                         <div className="rec-body">
                           <label className="flbl">Name</label>
@@ -1567,13 +1604,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   const insName = (ownerOpts.filter((o) => o.value !== "joint").find((o) => o.value === (p.insured || "client1")) || {}).label || "";
                   return (
                     <div className={`rec ${expanded ? "open" : ""}`} key={p.id}>
-                      <button className="rec-bar" onClick={() => toggleOpen(p.id)}>
+                      <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(p.id, protection)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(p.id, protection); } }}>
                         <span className="swatch" style={{ background: t.accent }} />
                         <span className="rec-name-r">{p.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{insName}</span>}
                         <span className="rec-sum num">{sym}{(Number(p.sumAssured) || 0).toLocaleString()}</span>
+                        <QuickDel onConfirm={() => rmPol(p.id)} />
                         <ChevronDown size={15} className="chev" />
-                      </button>
+                      </div>
                       {expanded && (
                         <div className="rec-body">
                           <label className="flbl">Name</label>
@@ -2421,6 +2459,13 @@ const CSS = `
 .app-root{font-family:'Hanken Grotesk',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);height:100%;min-height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
 .app-root *{box-sizing:border-box;}
 .num{font-family:'Hanken Grotesk',ui-sans-serif,sans-serif;font-variant-numeric:tabular-nums;}
+/* Micro-interactions — shared press/hover feel across every action control */
+.add-btn,.goal-btn,.wi-reset,.xc-btn,.scen-btn,.pg-chart-btn,.report-btn,.add-band,.scen-del,.rec-del,.del-row,.tax-presets button{transition:transform .1s ease,border-color .15s ease,color .15s ease,background .15s ease,box-shadow .15s ease;}
+.add-btn:active,.goal-btn:active,.wi-reset:active,.xc-btn:active,.scen-btn:active,.pg-chart-btn:active,.report-btn:active,.add-band:active,.tax-presets button:active{transform:scale(.97);}
+.rec:hover{border-color:var(--border-strong);}
+/* Consistent focus rings for keyboard users */
+.pick:focus-visible,.rec-name:focus-visible,.money-in:focus-visible,.notes-area:focus-visible,.scen-name:focus-visible,.tax-label-in:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:6px;}
+.add-btn:focus-visible,.goal-btn:focus-visible,.wi-reset:focus-visible,.xc-btn:focus-visible,.scen-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:30;flex:none;}
 .brand{display:flex;align-items:center;gap:11px;}
@@ -2453,9 +2498,16 @@ const CSS = `
 .tab{display:flex;align-items:center;gap:6px;white-space:nowrap;background:var(--bg);border:1px solid var(--border);color:var(--mid);padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:500;font-family:inherit;cursor:pointer;}
 .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
 
-.editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;}
+.editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
+.editor::-webkit-scrollbar,.rail::-webkit-scrollbar,.chartwrap::-webkit-scrollbar,.modal::-webkit-scrollbar,.notes-area::-webkit-scrollbar{width:8px;height:8px;}
+.editor::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb,.chartwrap::-webkit-scrollbar-thumb,.modal::-webkit-scrollbar-thumb,.notes-area::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box;}
+.editor::-webkit-scrollbar-thumb:hover{background:var(--low);border:2px solid transparent;background-clip:content-box;}
+.editor::-webkit-scrollbar-track,.rail::-webkit-scrollbar-track,.chartwrap::-webkit-scrollbar-track,.modal::-webkit-scrollbar-track,.notes-area::-webkit-scrollbar-track{background:transparent;}
+.rail{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
+.chartwrap{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
 .ed-body{padding:18px 16px;display:flex;flex-direction:column;gap:13px;}
 .ed-head{display:flex;align-items:center;justify-content:space-between;}
+.ed-body > .ed-head:first-child{position:sticky;top:0;z-index:6;background:var(--panel);margin:-18px -16px 8px;padding:16px 16px 10px;border-bottom:1px solid var(--border);}
 .ed-head-tools{display:flex;align-items:center;gap:8px;}
 .xc-btn{background:none;border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-size:11.5px;font-weight:600;color:var(--low);cursor:pointer;font-family:inherit;}
 .xc-btn:hover{color:var(--ink);border-color:var(--border-strong);}
@@ -2568,9 +2620,14 @@ const CSS = `
 .client-label{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.05em;margin-top:4px;}
 .client-card{background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:13px;display:flex;flex-direction:column;gap:11px;}
 
-.rec{background:var(--bg);border:1px solid var(--border);border-radius:11px;overflow:hidden;}
+.rec{background:var(--bg);border:1px solid var(--border);border-radius:11px;overflow:hidden;transition:border-color .15s ease,box-shadow .15s ease;}
+.rec:hover{border-color:var(--border-strong);}
 .rec.open{border-color:var(--border-strong);box-shadow:var(--shadow);}
-.rec-bar{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:none;padding:11px 12px;cursor:pointer;font-family:inherit;text-align:left;color:var(--ink);}
+.rec-body{animation:recIn .18s cubic-bezier(.2,.7,.3,1) both;}
+@keyframes recIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
+@media (prefers-reduced-motion: reduce){.rec-body{animation:none;}}
+.rec-bar{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:none;padding:11px 12px;cursor:pointer;font-family:inherit;text-align:left;color:var(--ink);user-select:none;outline:none;}
+.rec-bar:focus-visible{box-shadow:inset 0 0 0 2px var(--accent);border-radius:10px;}
 .swatch{width:11px;height:11px;border-radius:3px;flex:none;}
 .rec-name-r{flex:1;font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .owner-chip{font-size:9.5px;font-weight:600;padding:2px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent);white-space:nowrap;}
@@ -2579,11 +2636,23 @@ const CSS = `
 .prio.discretionary{background:var(--track);color:var(--mid);}
 .rec-sum{font-size:12.5px;color:var(--mid);white-space:nowrap;}
 .rec-sum em{font-style:normal;color:var(--low);font-size:11px;}
-.chev{color:var(--low);transition:.18s;flex:none;}
+.qdel{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;border-radius:6px;color:var(--low);opacity:.35;transition:opacity .12s ease,color .12s ease,background .12s ease;flex-shrink:0;cursor:pointer;}
+.rec-bar:hover .qdel,.qdel:focus-visible,.qdel.armed{opacity:1;}
+.qdel:hover{color:var(--red);background:color-mix(in srgb, var(--red) 9%, transparent);}
+.qdel.armed{color:var(--red);background:color-mix(in srgb, var(--red) 12%, transparent);padding:0 7px;}
+.qdel em{font-style:normal;font-size:11px;font-weight:700;}
+@media (hover:none){.qdel{opacity:1;}}
+.chev{transition:transform .18s ease;color:var(--low);flex-shrink:0;}
 .rec.open .chev{transform:rotate(180deg);}
-.rec-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:13px;border-top:1px solid var(--border);}
+.rec-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:13px;border-top:1px solid var(--border);animation:recIn .18s ease-out;}
+@keyframes recIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
 .flbl{font-size:11px;color:var(--low);font-weight:500;margin-top:11px;}
-.rec-name{background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--ink);font-size:13.5px;font-weight:600;font-family:inherit;padding:9px 10px;}
+.rec-name{background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--ink);font-size:13.5px;font-weight:600;font-family:inherit;padding:9px 10px;transition:border-color .12s ease,box-shadow .12s ease;outline:none;}
+.rec-name:focus,.pick:focus,.tax-label-in:focus,.scen-name:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent);outline:none;}
+.money:focus-within,.mininum:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent);}
+.money,.mininum,.pick{transition:border-color .12s ease,box-shadow .12s ease;}
+.add-btn,.xc-btn,.scen-btn,.pg-chart-btn,.goal-btn,.wi-reset,.report-btn,.add-band{transition:color .12s ease,border-color .12s ease,background .12s ease,box-shadow .12s ease;}
+.rail-item{transition:background .12s ease,color .12s ease;}
 .rec-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
 .rec-field{display:flex;flex-direction:column;gap:5px;min-width:0;}
 .rec-field label{font-size:11px;color:var(--low);font-weight:500;}
@@ -2618,8 +2687,8 @@ const CSS = `
 .app.present .chartwrap{padding:22px 36px;gap:16px;}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px;box-shadow:var(--shadow);}
-.stat-label{font-size:12px;color:var(--mid);font-weight:500;margin-bottom:5px;}
-.stat-value{font-size:23px;font-weight:600;letter-spacing:-0.02em;line-height:1.05;}
+.stat-label{font-size:11px;color:var(--mid);font-weight:600;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em;}
+.stat-value{font-size:26px;font-weight:650;letter-spacing:-0.022em;line-height:1.04;font-variant-numeric:tabular-nums;}
 .stat-sub{font-size:11.5px;color:var(--low);margin-top:3px;}
 .stat-green .stat-value{color:var(--green);} .stat-amber .stat-value{color:var(--amber);} .stat-red .stat-value{color:var(--red);}
 
