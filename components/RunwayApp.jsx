@@ -942,7 +942,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Cash gap analysis — base plan (ignores any active stress overlay), in the report's money basis.
   // Three states: no draw at all · one-off years only · sustained drawdown.
   const cashGap = useMemo(() => {
-    if (!reportOpen) return null;
     const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
     const drawRows = rows.map((r) => ({ ...r, draw: defl(r.coveredBySavings || 0, r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
     const totalDrawn = rows.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0);
@@ -956,7 +955,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const next5 = rows.filter((r) => r.year >= first.year && r.year < first.year + 5);
     const avgDraw = next5.length ? next5.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0) / next5.length : first.draw;
     return { ...base, none: false, oneOffOnly: false, firstYear: first.year, firstAge: first.c1Age, avgDraw, peakDraw: peak.draw, peakYear: peak.year };
-  }, [reportOpen, rows, showReal, inflDec]);
+  }, [rows, showReal, inflDec]);
+
+  // Plan phases — classifies every year of the base plan for the cash gap timeline strip.
+  // Priority: short (red) > drawing (amber) > covered (green).
+  const planPhases = useMemo(() => {
+    if (!rows.length) return null;
+    const phaseOf = (r) => ((r.shortfall || 0) > 0 ? "short" : (r.coveredBySavings || 0) > 0 ? "draw" : "ok");
+    const segs = [];
+    rows.forEach((r) => {
+      const ph = phaseOf(r);
+      const last = segs[segs.length - 1];
+      if (last && last.phase === ph) { last.toYear = r.year; last.toAge = r.c1Age; last.n += 1; }
+      else segs.push({ phase: ph, fromYear: r.year, toYear: r.year, fromAge: r.c1Age, toAge: r.c1Age, n: 1 });
+    });
+    return { segs, total: rows.length };
+  }, [rows]);
 
   // Protection snapshot — cover in force per person + what pays at the first death in the base plan.
   const protSnap = useMemo(() => {
@@ -1759,6 +1773,34 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               </ResponsiveContainer>
             </div>
           </div>
+
+          {/* Cash gap — the plan in three phases, always visible */}
+          {planPhases && cashGap && (
+            <div className="gap-card">
+              <div className="gap-head">
+                <span className="gap-title">Cash gap <InfoTip text="Your plan in phases. Green: income covers spending. Amber: spending exceeds income and the difference is drawn from savings — normal in retirement; the question is whether the pots last. Red: the gap can no longer be met from income or accessible savings." /></span>
+                <span className="gap-sub">{stress || ci || survivorOverlay ? "base plan — scenario shown on the charts above" : showReal ? "today's money" : "future money"}</span>
+              </div>
+              <div className="gap-strip">
+                {planPhases.segs.map((sg, i) => (
+                  <div key={i} className={`gap-seg gap-${sg.phase}`} style={{ flexGrow: sg.n }} title={`${sg.fromYear}–${sg.toYear}`}>
+                    {sg.n / planPhases.total > 0.13 && <span className="gap-seg-lbl">{sg.phase === "ok" ? "Income covers spending" : sg.phase === "draw" ? "Drawing from savings" : "Gap unmet"}</span>}
+                    {sg.n / planPhases.total > 0.07 && <span className="gap-seg-yrs num">{sg.fromYear}{sg.n > 1 ? `–${sg.toYear}` : ""}</span>}
+                  </div>
+                ))}
+              </div>
+              <div className="gap-stats">
+                {cashGap.none && <span className="gap-stat gap-stat-ok">✓ Income covers spending in every year — savings are never drawn upon</span>}
+                {cashGap.oneOffOnly && <span className="gap-stat">Savings used only for one-off costs ({cashGap.isolatedYears.join(", ")}) · largest {fmtFull(cashGap.peakDraw, cur)}</span>}
+                {!cashGap.none && !cashGap.oneOffOnly && (<>
+                  <span className="gap-stat">Drawdown starts <b className="num">{cashGap.firstYear}</b>{(() => { const yrs = cashGap.firstYear - new Date().getFullYear(); return yrs > 0 ? ` — in ${yrs} year${yrs === 1 ? "" : "s"}` : " — already underway"; })()}</span>
+                  <span className="gap-stat">Typical draw <b className="num">~{fmtFull(cashGap.avgDraw, cur)}/yr</b></span>
+                  <span className="gap-stat">Total drawn <b className="num">{fmtFull(cashGap.totalDrawn, cur)}</b></span>
+                </>)}
+                {cashGap.uncoveredCount > 0 && <span className="gap-stat gap-stat-red">⚠ {cashGap.uncoveredCount} year{cashGap.uncoveredCount === 1 ? "" : "s"} unmet from {cashGap.firstUncoveredYear}</span>}
+              </div>
+            </div>
+          )}
         </main>
         {goalOpen && goal && (() => {
           const ret1 = Number(profile.client1.retirementAge) || 0;
@@ -2425,6 +2467,25 @@ const CSS = `
 .chart-cmp i{width:14px;height:0;border-top:2.5px solid hsl(185 70% 42%);display:inline-block;}
 .chart-cmp b{color:var(--ink);}
 .chart-cmp-x{background:none;border:1px solid var(--border);border-radius:5px;color:var(--low);cursor:pointer;font-size:11px;line-height:1;padding:2px 5px;margin-left:2px;}
+.gap-card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:13px 17px 12px;display:flex;flex-direction:column;gap:9px;box-shadow:var(--shadow);}
+.gap-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;}
+.gap-title{font-size:13px;font-weight:600;color:var(--ink);display:inline-flex;align-items:center;gap:5px;}
+.gap-sub{font-size:11px;color:var(--low);}
+.gap-strip{display:flex;width:100%;height:34px;border-radius:8px;overflow:hidden;gap:2px;}
+.gap-seg{display:flex;flex-direction:column;justify-content:center;padding:0 8px;min-width:6px;flex-basis:0;overflow:hidden;}
+.gap-ok{background:color-mix(in srgb, var(--green) 16%, var(--card));}
+.gap-draw{background:color-mix(in srgb, var(--amber) 20%, var(--card));}
+.gap-short{background:color-mix(in srgb, var(--red) 20%, var(--card));}
+.gap-seg-lbl{font-size:10.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gap-ok .gap-seg-lbl{color:var(--green);}
+.gap-draw .gap-seg-lbl{color:var(--amber);}
+.gap-short .gap-seg-lbl{color:var(--red);}
+.gap-seg-yrs{font-size:9.5px;color:var(--low);white-space:nowrap;}
+.gap-stats{display:flex;flex-wrap:wrap;gap:6px 18px;}
+.gap-stat{font-size:11.5px;color:var(--mid);}
+.gap-stat b{color:var(--ink);font-weight:600;}
+.gap-stat-ok{color:var(--green);font-weight:600;}
+.gap-stat-red{color:var(--red);font-weight:600;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
