@@ -121,6 +121,8 @@ const taxDefault = () => ({
 const TAX_PRESETS = {
   none: { personalAllowance: 0, bands: [] },
   uk: { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }] },
+  pt: { personalAllowance: 4462, bands: [{ upTo: 28400, rate: 25 }, { upTo: 83696, rate: 35 }, { upTo: "", rate: 48 }] }, // Portugal — simplified/indicative
+  flat20: { personalAllowance: 0, bands: [{ upTo: "", rate: 20 }] },
   blank: { personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] },
 };
 // Stress scenarios — each returns {yearOffset: growthDeltaPts}. Args: retirement year offset, plan end offset.
@@ -265,8 +267,9 @@ const bandUpper = (b) => (b.upTo == null || b.upTo === "" ? Infinity : Number(b.
 function incomeTaxOf(income, period) {
   if (!period || !period.bands || !period.bands.length) return 0;
   const pa = Number(period.personalAllowance) || 0;
+  const sorted = [...period.bands].sort((a, b) => bandUpper(a) - bandUpper(b)); // tolerate unsorted entry
   let tax = 0, lower = pa;
-  for (const b of period.bands) {
+  for (const b of sorted) {
     const upper = bandUpper(b);
     if (income > lower) { const amt = Math.min(income, upper) - lower; if (amt > 0) tax += (amt * (Number(b.rate) || 0)) / 100; }
     lower = upper;
@@ -282,7 +285,8 @@ function grossUpIncome(need, prior, period) {
   const baseTax = incomeTaxOf(prior, period);
   const netOf = (g) => g - (incomeTaxOf(prior + g, period) - baseTax);
   let lo = need, hi = need * 2 + 1000;
-  for (let i = 0; i < 50 && netOf(hi) < need; i++) hi *= 1.6;
+  for (let i = 0; i < 60 && netOf(hi) < need; i++) hi *= 1.6;
+  if (netOf(hi) < need) return hi; // pathological band table (≥100% marginal) — give up gracefully
   for (let i = 0; i < 48; i++) { const m = (lo + hi) / 2; if (netOf(m) >= need) hi = m; else lo = m; }
   return hi;
 }
@@ -445,7 +449,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     // Withdraw to net `need` from one asset, applying tax for the active period.
     // When period is null (tax off) every branch returns gross === net → identical to the old loop.
     const period = taxPeriodFor(c1Age, ctx.tax);
-    const cgt = period ? (Number(ctx.tax.cgtRate) || 0) / 100 : 0;
+    const cgt = period ? Math.min(0.99, Math.max(0, (Number(ctx.tax.cgtRate) || 0) / 100)) : 0;
     const drawFrom = (a, need, taxableYr) => {
       const avail = bal[a.id];
       if (avail <= 0 || need <= 0) return { gross: 0, net: 0, taxable: 0 };
@@ -818,7 +822,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       });
       const cInfl = (Number((compareData.assumptions || {}).inflation) || 0) / 100;
       const mp = new Map();
-      crows.forEach((r) => { const f = showReal ? Math.pow(1 + cInfl, r.y) : 1; mp.set(r.year, (r.total - (r.debt || 0)) / f); });
+      let lifeTax = 0;
+      crows.forEach((r) => { const f = showReal ? Math.pow(1 + cInfl, r.y) : 1; mp.set(r.year, (r.total - (r.debt || 0)) / f); lifeTax += (r.taxPaid || 0) / f; });
+      mp.lifeTax = lifeTax;
       return mp;
     } catch { return null; }
   }, [compareData, showReal]);
@@ -926,7 +932,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   /* ---- Report configuration & derived analysis ---------------------------------------------- */
   const REPORT_CFG_KEY = "runway_report_cfg";
   const defaultReportCfg = () => ({
-    sections: { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, commentary: true },
+    sections: { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
     anonymous: false, adviser: "", firm: "",
   });
   const [reportCfg, setReportCfg] = useState(() => {
@@ -971,6 +977,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     });
     return { segs, total: rows.length };
   }, [rows]);
+
+  // Lifetime tax — total illustrative tax paid over the whole plan, in the current money basis.
+  const lifetimeTax = useMemo(() => rows.reduce((s, r) => s + (showReal ? (r.taxPaid || 0) / Math.pow(1 + inflDec, r.y) : (r.taxPaid || 0)), 0), [rows, showReal, inflDec]);
 
   // Protection snapshot — cover in force per person + what pays at the first death in the base plan.
   const protSnap = useMemo(() => {
@@ -1102,9 +1111,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const incOwners = new Set(incomes.filter((i) => (Number(i.amount) || 0) > 0).map((i) => i.owner || "client1"));
     if (couple && incOwners.size === 1 && incomes.length > 0) watch.push(`all recorded income belongs to ${incOwners.has("client2") ? n2 : n1}`);
     if (watch.length) paras.push("Watch points: " + watch.join("; ") + ".");
+    if (lifetimeTax > 0) paras.push(`Illustrative tax over the life of the plan totals ${m(lifetimeTax)}, based on the residence timeline and rates entered.`);
     paras.push(`All figures are ${showReal ? "in today's money (adjusted for inflation)" : "in future money (not adjusted for inflation)"} and reflect the assumptions listed in this report.${stressActive ? " They describe the base plan; the active stress scenario is reported separately." : ""} This commentary describes the projection — it is not a recommendation.`);
     return paras.join("\n\n");
-  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive]);
+  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive, lifetimeTax]);
   const commentaryText = commentaryEdit ?? generatedCommentary;
 
   const goal = useMemo(() => {
@@ -1177,7 +1187,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const addPeriod = () => setTax({ periods: [...tax.periods, { id: uid(), label: "New jurisdiction", startMode: "age", startAge: Math.max(ectx.age0c1 + 1, 65), personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] }] });
   const rmPeriod = (id) => setTax({ periods: tax.periods.filter((x) => x.id !== id) });
   const applyPreset = (id, key) => upPeriod(id, { personalAllowance: TAX_PRESETS[key].personalAllowance, bands: TAX_PRESETS[key].bands.map((b) => ({ ...b })) });
-  const upBand = (pid, idx, patch) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: p.bands.map((b, i) => (i === idx ? { ...b, ...patch } : b)) }); };
+  const upBand = (pid, idx, patch) => { const p = tax.periods.find((x) => x.id === pid); if (patch.rate != null) patch = { ...patch, rate: Math.min(99, Math.max(0, Number(patch.rate) || 0)) }; upPeriod(pid, { bands: p.bands.map((b, i) => (i === idx ? { ...b, ...patch } : b)) }); };
   const addBand = (pid) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: [...p.bands, { upTo: "", rate: 0 }] }); };
   const rmBand = (pid, idx) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: p.bands.filter((_, i) => i !== idx) }); };
   const toggleOpen = (id) => setOpen((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -1404,7 +1414,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </div>
                 {tax.enabled && (
                   <>
-                    <div className="field"><label>CGT on investment withdrawals <InfoTip text="A simplified effective rate applied to money drawn from investment pots (not cash, pensions or offshore bonds). Set 0 for ISAs or non-resident clients with no CGT. It's an approximation you control, not a full gain calculation." /></label><Mini value={tax.cgtRate} suffix="%" onChange={(v) => setTax({ cgtRate: v })} /></div>
+                    <div className="field"><label>CGT on investment withdrawals <InfoTip text="A simplified effective rate applied to money drawn from investment pots (not cash, pensions or offshore bonds). Set 0 for ISAs or non-resident clients with no CGT. It's an approximation you control, not a full gain calculation — it taxes the whole withdrawal, not just the gain." /></label><Mini value={tax.cgtRate} suffix="%" onChange={(v) => setTax({ cgtRate: Math.min(99, Math.max(0, Number(v) || 0)) })} /></div>
                     <div className="tax-tl-head">Residence timeline <InfoTip text={`Periods run in age order, anchored to ${couple ? fn1 + "'s" : "the client's"} age. The first starts now; add one to model a move — e.g. tax-free until 60, then UK rates from 60. Tax only affects years where money is withdrawn from pensions or investment pots, so accumulation years won't change.`} /></div>
                     {tax.periods.map((p, idx) => (
                       <div className="tax-period" key={p.id}>
@@ -1415,7 +1425,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                             : <span className="tax-from">from {couple ? `${fn1}'s age` : "age"} <NumberInput className="tax-age" value={p.startAge} onCommit={(v) => upPeriod(p.id, { startAge: v })} /> <em className="tax-yr">≈ {baseYear + Math.max(0, Math.round((Number(p.startAge) || 0) - ectx.age0c1))}</em></span>}
                           {tax.periods.length > 1 && <button className="rec-del" onClick={() => rmPeriod(p.id)}><Trash2 size={14} /></button>}
                         </div>
-                        <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "blank")}>Blank</button></div>
+                        <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax (UAE/Gulf)</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "pt")}>Portugal*</button><button onClick={() => applyPreset(p.id, "flat20")}>Flat 20%</button><button onClick={() => applyPreset(p.id, "blank")}>Blank</button></div>
                         <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
                         <div className="tax-bands">
                           <div className="tax-bands-head"><span>Income up to</span><span>Rate</span><span /></div>
@@ -1433,7 +1443,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       </div>
                     ))}
                     <button className="add-btn wide" onClick={addPeriod}><Plus size={15} /> Add a move / new jurisdiction</button>
-                    <p className="ed-hint">Income you enter is treated as net (take-home), so it isn't taxed again. Tax here applies to pension-pot withdrawals, investment drawdown (CGT), and offshore-bond gains above the 5% allowance.</p>
+                    <div className="tax-lifetime"><span>Lifetime tax in this plan</span><b className="num">{fmtFull(lifetimeTax, cur)}</b><em>{showReal ? "today's money" : "future money"} · updates live as you edit</em></div>
+                    <p className="ed-hint">Income you enter is treated as net (take-home), so it isn't taxed again — to model a move while still earning, enter two income rows with the net amounts for each country. Tax here applies to pension-pot withdrawals, investment drawdown (CGT), and offshore-bond gains above the 5% allowance. To compare jurisdictions side by side, duplicate this plan in Scenarios, change the residence timeline in the copy, and hit Compare.</p>
+                    <p className="tax-disclaimer">Tax figures are illustrative estimates based on the assumptions you set above. They are not tax advice and should not be relied upon — tax treatment depends on individual circumstances and changes over time.</p>
                   </>
                 )}
               </div>
@@ -1672,7 +1684,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
           <div className="chart-card">
             <div className="chart-head">
-              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
+              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; const showTax = lifetimeTax > 0 || (compareMap.lifeTax || 0) > 0; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{showTax ? <> · lifetime tax {fmtFull(compareMap.lifeTax || 0, cur)} vs {fmtFull(lifetimeTax, cur)} here</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
               {!present && (
                 <div className="head-toggles">
                   <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
@@ -1942,12 +1954,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
             { id: "inputs", label: "Detailed inputs", },
             { id: "assumptions", label: "Assumptions" },
+            { id: "taxov", label: "Tax overview", off: !(assumptions.tax && assumptions.tax.enabled), why: "tax not applied to this plan" },
             { id: "commentary", label: "Commentary" },
           ];
           const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
           const setPreset = (kind) => {
-            const brief = { exec: true, snapshot: false, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, commentary: false };
-            const comp = { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, commentary: true };
+            const brief = { exec: true, snapshot: false, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
+            const comp = { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
             upReportCfg({ sections: kind === "brief" ? brief : comp });
           };
           const verdictText = kpis.depletionAge === null
@@ -2326,6 +2339,30 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </section>
                 )}
 
+                {/* Tax overview */}
+                {on("taxov") && assumptions.tax && assumptions.tax.enabled && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Tax overview</h2>
+                    <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income entered in the plan is treated as net; tax applies to pension withdrawals, investment drawdown and offshore-bond gains.</p>
+                    <table className="rep-table">
+                      <thead><tr><th>Residence period</th><th>From</th><th className="r">Tax-free allowance</th><th className="r">Bands</th></tr></thead>
+                      <tbody>
+                        {assumptions.tax.periods.map((p2, i) => (
+                          <tr key={p2.id}><td>{p2.label || "Period " + (i + 1)}</td><td>{i === 0 || p2.startMode === "now" ? "Start of plan" : `Age ${p2.startAge} (≈${baseYear + Math.max(0, Math.round((Number(p2.startAge) || 0) - ectx.age0c1))})`}</td><td className="r num">{m(Number(p2.personalAllowance) || 0)}</td><td className="r num">{p2.bands.length === 0 ? "No income tax" : p2.bands.map((b) => `${b.rate}%${b.upTo ? ` to ${fmtCompact(Number(b.upTo), cur)}` : "+"}`).join(" · ")}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <table className="rep-table" style={{ marginTop: 14 }}>
+                      <tbody>
+                        <tr><td>CGT on investment withdrawals</td><td className="r num">{Number(assumptions.tax.cgtRate) || 0}%</td></tr>
+                        <tr><td><b>Lifetime tax over the plan</b></td><td className="r num"><b>{m(lifetimeTax)}</b></td></tr>
+                      </tbody>
+                    </table>
+                    <p className="rep-p rep-small">Tax figures are illustrative estimates based on user-defined assumptions and should not be relied upon as tax advice. Tax treatment depends on individual circumstances and the rules of each jurisdiction, which change over time. Advice should be obtained from a qualified tax specialist.</p>
+                    <RepFoot />
+                  </section>
+                )}
+
                 {/* Commentary */}
                 {on("commentary") && commentaryText && (
                   <section className="report-page">
@@ -2486,6 +2523,11 @@ const CSS = `
 .gap-stat b{color:var(--ink);font-weight:600;}
 .gap-stat-ok{color:var(--green);font-weight:600;}
 .gap-stat-red{color:var(--red);font-weight:600;}
+.tax-lifetime{display:flex;align-items:baseline;gap:10px;border:1px solid var(--border);border-radius:11px;padding:10px 14px;background:var(--bg);margin-top:4px;}
+.tax-lifetime span{font-size:12px;color:var(--mid);}
+.tax-lifetime b{font-size:16px;color:var(--ink);}
+.tax-lifetime em{font-style:normal;font-size:10.5px;color:var(--low);margin-left:auto;}
+.tax-disclaimer{font-size:11px;color:var(--mid);border-left:3px solid var(--amber);padding:7px 11px;background:color-mix(in srgb, var(--amber) 7%, var(--card));border-radius:0 8px 8px 0;margin-top:6px;line-height:1.5;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
