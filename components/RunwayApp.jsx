@@ -1723,8 +1723,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     : <Area type="monotone" dataKey="netWorth" stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
                   {hasProperty && <Line type="monotone" dataKey="investable" stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
-                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={2} strokeDasharray="6 3" dot={false} isAnimationActive={false} />}
-                  {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(262 62% 58%)" strokeWidth={2} strokeDasharray="4 4" dot={false} isAnimationActive={false} />}
+                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={3} dot={false} isAnimationActive={false} />}
+                  {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 70% 42%)" strokeWidth={2.5} dot={{ r: 2, fill: "hsl(185 70% 42%)", strokeWidth: 0 }} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
               </ResponsiveContainer>
@@ -2154,10 +2154,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
                         <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
                         <Line type="monotone" dataKey="netWorth" stroke="#161b22" strokeWidth={1.7} dot={false} isAnimationActive={false} />
-                        <Line type="monotone" dataKey="stressed" stroke="#d64545" strokeWidth={1.7} strokeDasharray="6 3" dot={false} isAnimationActive={false} />
+                        <Line type="monotone" dataKey="stressed" stroke="#d64545" strokeWidth={2.5} dot={false} isAnimationActive={false} />
                       </ComposedChart>
                     </div>
-                    <div className="rep-legend"><span><i className="rep-solid" /> Base plan net worth</span><span><i className="rep-dash" style={{ background: "#d64545" }} /> Under the scenario</span></div>
+                    <div className="rep-legend"><span><i className="rep-solid" /> Base plan net worth</span><span><i className="rep-solid" style={{ background: "#d64545" }} /> Under the scenario</span></div>
                     <RepFoot />
                   </section>
                 )}
@@ -2418,11 +2418,11 @@ const CSS = `
 .scen-chip-on{background:var(--accent-soft,#eef3fb);color:var(--accent);}
 .scen-btn{background:none;border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-size:11.5px;font-weight:600;color:var(--low);cursor:pointer;font-family:inherit;white-space:nowrap;}
 .scen-btn:hover{color:var(--ink);border-color:var(--border-strong);}
-.scen-btn-cmp{border-color:hsl(262 62% 58%);color:hsl(262 62% 58%);}
+.scen-btn-cmp{border-color:hsl(185 70% 42%);color:hsl(185 70% 42%);}
 .scen-del{background:none;border:none;color:var(--low);cursor:pointer;padding:3px;display:flex;}
 .scen-del:hover{color:var(--red);}
 .chart-cmp{margin-top:5px;font-size:11.5px;color:var(--mid);display:flex;align-items:center;gap:6px;}
-.chart-cmp i{width:14px;height:0;border-top:2px dashed hsl(262 62% 58%);display:inline-block;}
+.chart-cmp i{width:14px;height:0;border-top:2.5px solid hsl(185 70% 42%);display:inline-block;}
 .chart-cmp b{color:var(--ink);}
 .chart-cmp-x{background:none;border:1px solid var(--border);border-radius:5px;color:var(--low);cursor:pointer;font-size:11px;line-height:1;padding:2px 5px;margin-left:2px;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
