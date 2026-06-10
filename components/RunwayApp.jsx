@@ -709,6 +709,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const [stress, setStress] = useState(null);
   const [ci, setCi] = useState(null);
   const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000 });
+  const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } — mirrors death to chart
   const [annotations, setAnnotations] = useState(seed.annotations || []);
 
   const [profile, setProfile] = useState(seed.profile);
@@ -786,9 +787,15 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const stressRows = useMemo(() => {
     const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection };
     if (ci) return projectCashflow({ ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear } });
+    if (survivorOverlay) {
+      const sovAge0 = survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1;
+      const sovProf = { ...effProfile, [survivorOverlay.owner]: { ...effProfile[survivorOverlay.owner], lifeExpectancy: survivorOverlay.deathAge } };
+      const sovPayout = protection.filter((p) => (p.ptype || "life") !== "ci" && (p.insured || "client1") === survivorOverlay.owner && (Number(p.coverToAge) || 0) > survivorOverlay.deathAge).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+      return projectCashflow({ ...baseArgs, profile: sovProf, lumpSums: sovPayout > 0 ? [{ year: survivorOverlay.deathAge + 1 - sovAge0, amount: sovPayout }] : [] });
+    }
     if (stressShocks) return projectCashflow({ ...baseArgs, shocks: stressShocks });
     return null;
-  }, [ci, ciClaimYear, stressShocks, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection]);
+  }, [ci, ciClaimYear, survivorOverlay, stressShocks, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, ectx]);
   const colors = useMemo(() => buildColors(assets), [assets]);
   const incColors = useMemo(() => buildIncomeColors(incomes), [incomes]);
   const stackOrder = useMemo(() => [...assets].sort((a, b) => STACK_RANK[a.type] - STACK_RANK[b.type]), [assets]);
@@ -816,7 +823,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     if (!stressRows) return null;
     const sc = STRESS_SCENARIOS.find((s) => s.id === stress);
     const ageOf = (dr) => (dr ? (dr.aliveC1 ? dr.c1Age : dr.c2Age) : null);
-    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : sc ? sc.label : "";
+    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : sc ? sc.label : "";
     return { label, baseAge: ageOf(rows.find((r) => r.shortfall > 0)), stressAge: ageOf(stressRows.find((r) => r.shortfall > 0)) };
   }, [stressRows, rows, stress, ci, fn1, fn2]);
 
@@ -977,7 +984,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
       if (o === "joint") { annualNow.client1 += ann / 2; annualNow.client2 += ann / 2; }
       else annualNow[o] += ann;
     });
-    const inForce = (k, ty) => protection.filter((p) => (p.insured || "client1") === k && (p.ptype || "life") === ty && (Number(p.coverToAge) || 0) >= (k === "client2" ? ectx.age0c2 : ectx.age0c1)).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+    const inForce = (k, ty) => protection.filter((p) => (p.insured || "client1") === k && (p.ptype || "life") === ty && (Number(p.coverToAge) || 0) > (k === "client2" ? ectx.age0c2 : ectx.age0c1)).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
     const keys = couple ? ["client1", "client2"] : ["client1"];
     const bench = keys.map((k) => {
       const inc = annualNow[k];
@@ -1285,7 +1292,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           {!present && (<>
             <select className="cur-sel num" value={cur} onChange={(e) => setProfile((p) => ({ ...p, currency: e.target.value }))}>{Object.values(CURRENCIES).map((c) => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}</select>
             <button className="icon-btn" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
-            <button className="report-btn" onClick={() => { setReportStage("options"); setReportOpen(true); }}><FileText size={15} /><span>Report</span></button>
+            <button className="report-btn" onClick={() => { setReportStage("options"); setCommentaryEdit(null); setReportOpen(true); }}><FileText size={15} /><span>Report</span></button>
           </>)}
           <button className="btn-primary" onClick={() => setPresent(!present)}>{present ? <Minimize2 size={15} /> : <Maximize2 size={15} />}<span>{present ? "Exit client view" : "Client view"}</span></button>
         </div>
@@ -1572,6 +1579,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                               <div className="pg-row pg-verdict pg-gap"><span>Survivor's plan runs short from {sv.firstShortYear}</span><span className="num">−{fmtFull(sv.totalShortReal, cur)} total</span></div>
                               <div className="pg-row pg-close"><span>Additional cover that closes the gap</span><span className="num">{sv.closeGap === Infinity ? "Beyond " + fmtFull(20000000, cur) : "~" + fmtFull(Math.ceil(sv.closeGap / 10000) * 10000, cur)}</span></div>
                             </>)}
+                        {(() => { const isActive = survivorOverlay && survivorOverlay.owner === sv.k && survivorOverlay.deathAge === sv.dAge; return isActive ? (<button className="pg-chart-btn pg-chart-btn-on" onClick={() => setSurvivorOverlay(null)}>× Clear from chart</button>) : (<button className="pg-chart-btn" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay({ owner: sv.k, deathAge: sv.dAge }); }}>↗ Show on chart</button>); })()}
                           </div>
                         ))}
                         <span className="field-note">Shortfall totals are in today's money. "Closes the gap" is the smallest lump sum at death under which no year shows a shortfall — an analysis of this plan, not a recommendation.</span>
@@ -1639,7 +1647,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
               <div className="stress-bar">
                 <span className="stress-tag"><AlertTriangle size={12} /> {stressImpact.label}</span>
                 <span className="stress-impact">{stressImpact.stressAge ? `funds run short at ${stressImpact.stressAge}` : "still funded for life"}{stressImpact.baseAge !== stressImpact.stressAge ? ` · base ${stressImpact.baseAge ?? "fully funded"}` : ""}</span>
-                <button className="wi-reset" onClick={() => { setStress(null); setCi(null); }}>Clear</button>
+                <button className="wi-reset" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear</button>
               </div>
             )}
             {!present && (
@@ -1675,14 +1683,14 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                     : <Area type="monotone" dataKey="netWorth" stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
                   {hasProperty && <Line type="monotone" dataKey="investable" stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
-                  {(stress || ci) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={2} strokeDasharray="6 3" dot={false} isAnimationActive={false} />}
+                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={2} strokeDasharray="6 3" dot={false} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
 
             <div className="cash-head">
-              <div className="cash-title">Money in vs money out<span>{stress || ci ? "showing the stressed scenario — income/spending under the shock" : "each year · hover for the breakdown by source"}</span></div>
+              <div className="cash-title">Money in vs money out<span>{stress || ci || survivorOverlay ? (survivorOverlay ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : "showing the stressed scenario — income/spending under the shock") : "each year · hover for the breakdown by source"}</span></div>
               <div className="legend sm">
                 <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                 <span><i style={{ background: t.amber }} /> Drawn from savings</span>
@@ -1796,12 +1804,12 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
               {(stress || ci) && stressImpact && (
                 <div className="active-overlay">
                   <span><AlertTriangle size={13} /> Active: {stressImpact.label}</span>
-                  <button onClick={() => { setStress(null); setCi(null); }}>Clear overlay</button>
+                  <button onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear overlay</button>
                 </div>
               )}
               <div className="goal-cards">
                 {STRESS_SCENARIOS.map((s) => (
-                  <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { setStress(s.id); setCi(null); setStressOpen(false); } }}>
+                  <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { setStress(s.id); setCi(null); setSurvivorOverlay(null); setStressOpen(false); } }}>
                     <div className="goal-card-head"><AlertTriangle size={14} /> {s.label}</div>
                     <div className="goal-card-text">{s.desc}</div>
                   </button>
@@ -1817,7 +1825,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 </div>
                 {(() => { const ciCover = protection.filter((p) => (p.ptype || "life") === "ci" && (p.insured || "client1") === ciDraft.owner && (Number(p.coverToAge) || 0) >= (Number(ciDraft.age) || 0)).reduce((s2, p) => s2 + (Number(p.sumAssured) || 0), 0); return ciCover > 0 && Number(ciDraft.amount) !== ciCover ? <div className="ci-hint">CI cover in force at that age: <b className="num">{fmtFull(ciCover, cur)}</b> <button className="xc-btn" onClick={() => setCiDraft((d) => ({ ...d, amount: ciCover }))}>Use</button></div> : null; })()}
                 <div className="ci-actions">
-                  <button className="ci-apply" onClick={() => { setCi({ ...ciDraft }); setStress(null); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
+                  <button className="ci-apply" onClick={() => { setCi({ ...ciDraft }); setStress(null); setSurvivorOverlay(null); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
                   {ci && <button className="ci-clear" onClick={() => setCi(null)}>Clear</button>}
                 </div>
               </div>
@@ -2358,6 +2366,10 @@ const CSS = `
 .pg-mult-row label{font-size:11.5px;color:var(--low);}
 .pg-surv{display:flex;flex-direction:column;gap:8px;}
 .ci-hint{font-size:12px;color:var(--mid);display:flex;align-items:center;gap:8px;margin-top:6px;}
+.pg-chart-btn{margin-top:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:5px 10px;font-size:11.5px;font-weight:600;color:var(--low);cursor:pointer;font-family:inherit;width:100%;text-align:left;}
+.pg-chart-btn:hover{border-color:var(--accent);color:var(--accent);}
+.pg-chart-btn-on{border-color:var(--red);color:var(--red);}
+.pg-chart-btn-on:hover{border-color:var(--red);color:var(--red);}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
