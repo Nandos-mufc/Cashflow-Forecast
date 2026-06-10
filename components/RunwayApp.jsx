@@ -11,6 +11,9 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import {
   User,
@@ -828,6 +831,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   }, [ectx, rows, couple, baseYear]);
 
   const hasDebt = useMemo(() => liabilities.some((L) => (Number(L.balance) || 0) > 0), [liabilities]);
+
   const hasContrib = useMemo(() => assets.some((a) => a.contribution && a.contribution.enabled && (a.contribution.source !== "employer" || a.type !== "pension") && (Number(a.contribution.amount) || 0) > 0), [assets]);
   const kpis = useMemo(() => {
     const grossNow = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
@@ -890,8 +894,112 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
 
   // "What if I asked…" — answers the questions clients actually ask, each solved against the pure engine.
   // Uses the real saved plan (not the what-if overlay). Binary/linear scans; only runs while the panel is open.
+  /* ---- Report configuration & derived analysis ---------------------------------------------- */
+  const REPORT_CFG_KEY = "runway_report_cfg";
+  const defaultReportCfg = () => ({
+    sections: { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, commentary: true },
+    anonymous: false, adviser: "", firm: "",
+  });
+  const [reportCfg, setReportCfg] = useState(() => {
+    if (typeof window === "undefined") return defaultReportCfg();
+    try { const saved = JSON.parse(localStorage.getItem(REPORT_CFG_KEY) || "null"); return saved ? { ...defaultReportCfg(), ...saved, sections: { ...defaultReportCfg().sections, ...(saved.sections || {}) } } : defaultReportCfg(); } catch { return defaultReportCfg(); }
+  });
+  const [reportStage, setReportStage] = useState("options"); // "options" | "view"
+  const [commentaryEdit, setCommentaryEdit] = useState(null); // null = follow generated
+  const [copiedSummary, setCopiedSummary] = useState(false);
+  const upReportCfg = (patch) => setReportCfg((c) => { const n = { ...c, ...patch, sections: { ...c.sections, ...(patch.sections || {}) } }; try { localStorage.setItem(REPORT_CFG_KEY, JSON.stringify(n)); } catch {} return n; });
+  const stressActive = !!stressImpact;
+
+  // Cash gap analysis — base plan (ignores any active stress overlay), in the report's money basis.
+  // Three states: no draw at all · one-off years only · sustained drawdown.
+  const cashGap = useMemo(() => {
+    if (!reportOpen) return null;
+    const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+    const drawRows = rows.map((r) => ({ ...r, draw: defl(r.coveredBySavings || 0, r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
+    const totalDrawn = rows.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0);
+    const uncovered = rows.filter((r) => (r.shortfall || 0) > 0);
+    const base = { uncoveredCount: uncovered.length, firstUncoveredYear: uncovered.length ? uncovered[0].year : null, totalDrawn };
+    if (!drawRows.length) return { ...base, none: true, oneOffOnly: false };
+    let peak = drawRows[0]; drawRows.forEach((r) => { if (r.draw > peak.draw) peak = r; });
+    const sustained = drawRows.find((r, i) => drawRows[i + 1] && drawRows[i + 1].year === r.year + 1);
+    if (!sustained) return { ...base, none: false, oneOffOnly: true, isolatedYears: drawRows.map((r) => r.year), peakDraw: peak.draw, peakYear: peak.year };
+    const first = sustained;
+    const next5 = rows.filter((r) => r.year >= first.year && r.year < first.year + 5);
+    const avgDraw = next5.length ? next5.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0) / next5.length : first.draw;
+    return { ...base, none: false, oneOffOnly: false, firstYear: first.year, firstAge: first.c1Age, avgDraw, peakDraw: peak.draw, peakYear: peak.year };
+  }, [reportOpen, rows, showReal, inflDec]);
+
+  // Protection snapshot — cover in force per person + what pays at the first death in the base plan.
+  const protSnap = useMemo(() => {
+    if (!reportOpen || !protection.length) return null;
+    const per = {};
+    ["client1", "client2"].forEach((k) => {
+      const pols = protection.filter((p) => p.insured === k);
+      if (!pols.length) return;
+      per[k] = { total: pols.reduce((s, p) => s + (Number(p.sumAssured) || 0), 0), prem: pols.reduce((s, p) => s + (Number(p.premium) || 0), 0), count: pols.length };
+    });
+    let firstDeath = null;
+    if (couple && markers.firstDeath) {
+      const dr = rows.find((r) => r.year === markers.firstDeath);
+      const who = dr && !dr.aliveC1 ? "client1" : "client2";
+      const age = who === "client1" ? ectx.lifeC1 : ectx.lifeC2;
+      const paying = protection.filter((p) => p.insured === who && (Number(p.coverToAge) || 0) >= age);
+      firstDeath = { who, year: markers.firstDeath, payout: paying.reduce((s, p) => s + (Number(p.sumAssured) || 0), 0) };
+    }
+    return { per, firstDeath };
+  }, [reportOpen, protection, couple, markers.firstDeath, rows, ectx]);
+
+  // Deterministic commentary engine — observational language only, every number from the engine.
+  const generatedCommentary = useMemo(() => {
+    if (!reportOpen) return "";
+    const m = (v) => fmtFull(v, cur);
+    const anon = reportCfg.anonymous;
+    const n1 = anon ? "Client 1" : fn1, n2 = anon ? "Client 2" : fn2;
+    const y0 = rows[0] || {};
+    const surplus0 = (y0.income || 0) - (y0.expenditure || 0);
+    const paras = [];
+    // Funding verdict + trajectory
+    if (kpis.depletionAge === null) {
+      paras.push(`Based on the assumptions in this report, the plan is fully funded: spendable assets last to the end of the plan in ${kpis.endYear}, with a projected ${m(kpis.endVal)} of net worth remaining. Net worth peaks at approximately ${m(kpis.peak)}.`);
+    } else {
+      paras.push(`Based on the assumptions in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The figures below show the scale of the gap and the levers that influence it.`);
+    }
+    if (cashGap && !cashGap.none && !cashGap.oneOffOnly) {
+      paras.push(`Income currently ${surplus0 >= 0 ? `exceeds spending by about ${m(surplus0)} a year` : `falls short of spending by about ${m(-surplus0)} a year`}. From ${cashGap.firstYear}, spending begins to exceed income on a sustained basis and roughly ${m(cashGap.avgDraw)} a year is drawn from savings and investments, peaking at ${m(cashGap.peakDraw)} in ${cashGap.peakYear}.`);
+    } else if (cashGap && cashGap.oneOffOnly) {
+      paras.push(`Income covers regular spending in every year of the plan. Savings are drawn on only for one-off costs (${cashGap.isolatedYears.join(", ")}), the largest being ${m(cashGap.peakDraw)} in ${cashGap.peakYear}.`);
+    } else if (cashGap && cashGap.none) {
+      paras.push(`Income covers spending in every year of the plan — savings are never drawn upon under the current assumptions.`);
+    }
+    // Strengths
+    const strengths = [];
+    if (kpis.depletionAge === null) strengths.push("the plan remains funded across the full time horizon, including the survivor period" );
+    if (surplus0 > 0) strengths.push(`a current annual surplus of about ${m(surplus0)} while working`);
+    if (hasContrib) strengths.push("regular contributions are being made to savings or pensions");
+    const types = new Set(assets.map((a) => a.type));
+    if (types.size >= 3) strengths.push("assets are spread across several classes (" + [...types].map((t2) => TYPE_LABEL[t2].toLowerCase()).join(", ") + ")");
+    if (protection.length) strengths.push("life cover is in force");
+    if (kpis.depletionAge === null && kpis.endVal > 0) strengths.push(`a projected estate of ${m(kpis.endVal)} at the end of the plan`);
+    if (strengths.length) paras.push("Strengths: " + strengths.join("; ") + ".");
+    // Watch points
+    const watch = [];
+    if (kpis.depletionAge !== null) watch.push(`assets are projected to deplete at age ${kpis.depletionAge} (${kpis.depYear})`);
+    const gross = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
+    const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
+    if (gross > 0 && propVal / gross > 0.5) watch.push(`over half of total assets (${Math.round((propVal / gross) * 100)}%) is held in property, which the plan treats as non-spendable`);
+    if (!protection.length && (couple || liabilities.length > 0)) watch.push("no life cover is currently recorded" + (liabilities.length ? " while liabilities are outstanding" : ""));
+    if (couple && protSnap && protSnap.firstDeath && protSnap.firstDeath.payout === 0 && protection.length) watch.push(`the cover recorded does not extend to the first death in ${protSnap.firstDeath.year} (terms end earlier)`);
+    if (cashGap && !cashGap.none && cashGap.uncoveredCount > 0) watch.push(`${cashGap.uncoveredCount} year${cashGap.uncoveredCount === 1 ? "" : "s"} show spending that cannot be met from income or savings, starting ${cashGap.firstUncoveredYear}`);
+    const incOwners = new Set(incomes.filter((i) => (Number(i.amount) || 0) > 0).map((i) => i.owner || "client1"));
+    if (couple && incOwners.size === 1 && incomes.length > 0) watch.push(`all recorded income belongs to ${incOwners.has("client2") ? n2 : n1}`);
+    if (watch.length) paras.push("Watch points: " + watch.join("; ") + ".");
+    paras.push(`All figures are ${showReal ? "in today's money (adjusted for inflation)" : "in future money (not adjusted for inflation)"} and reflect the assumptions listed in this report.${stressActive ? " They describe the base plan; the active stress scenario is reported separately." : ""} This commentary describes the projection — it is not a recommendation.`);
+    return paras.join("\n\n");
+  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive]);
+  const commentaryText = commentaryEdit ?? generatedCommentary;
+
   const goal = useMemo(() => {
-    if (!goalOpen) return null;
+    if (!goalOpen && !reportOpen) return null;
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
@@ -937,7 +1045,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
 
     return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, maxOneOff, maxMonthly, to100, estateEnd: kpis.endVal, estateEndYear: kpis.endYear, liquidAssets };
-  }, [goalOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
+  }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
   const rmFn = (setter) => (id) => { setter((prev) => prev.filter((x) => x.id !== id)); setOpen((s) => { const n = new Set(s); n.delete(id); return n; }); };
@@ -969,24 +1077,34 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
 
   // ---- Risk profiles (per client) -------------------------------------------------------------
   // Selecting a profile applies its per-type growth rates to the assets that person owns.
-  // riskProfiles persists the selection; the badge shows "edited" if any rate has since been
-  // changed by hand, so the adviser always knows whether the label still reflects reality.
+  // Template rates are firm-configurable: overrides persist in localStorage (device-level house
+  // assumptions), merged over the shipped defaults. Apply + drift both use the effective rates.
+  const RISK_RATES_KEY = "runway_risk_rates";
+  const [riskRateOverrides, setRiskRateOverrides] = useState(() => {
+    if (typeof window === "undefined") return {};
+    try { return JSON.parse(localStorage.getItem(RISK_RATES_KEY) || "{}") || {}; } catch { return {}; }
+  });
+  const [riskEditOpen, setRiskEditOpen] = useState(false);
+  const getRiskRates = (id) => { const p = riskProfileById(id); return p ? { ...p.rates, ...(riskRateOverrides[id] || {}) } : null; };
+  const setRiskRate = (id, type, v) => setRiskRateOverrides((o) => { const n = { ...o, [id]: { ...(o[id] || {}), [type]: Number(v) } }; try { localStorage.setItem(RISK_RATES_KEY, JSON.stringify(n)); } catch {} return n; });
+  const resetRiskRates = () => { setRiskRateOverrides({}); try { localStorage.removeItem(RISK_RATES_KEY); } catch {} };
+  const riskRatesCustomised = Object.keys(riskRateOverrides).length > 0;
   const riskProfiles = assumptions.riskProfiles || {};
   const applyRiskProfile = (ownerKey, profileId) => {
-    const p = riskProfileById(profileId);
+    const rates = getRiskRates(profileId);
     setAssumptions((a) => ({ ...a, riskProfiles: { ...(a.riskProfiles || {}), [ownerKey]: profileId || null } }));
-    if (!p) return; // "custom" / cleared — keep current rates
-    setAssets((prev) => prev.map((as) => ((as.owner || "client1") === ownerKey && p.rates[as.type] != null ? { ...as, growthRate: p.rates[as.type] } : as)));
+    if (!rates) return; // "custom" / cleared — keep current rates
+    setAssets((prev) => prev.map((as) => ((as.owner || "client1") === ownerKey && rates[as.type] != null ? { ...as, growthRate: rates[as.type] } : as)));
   };
   const riskDrift = useMemo(() => {
     const drift = {};
     ["client1", "client2", "joint"].forEach((k) => {
-      const p = riskProfileById(riskProfiles[k]);
-      if (!p) return;
-      drift[k] = assets.some((as) => (as.owner || "client1") === k && p.rates[as.type] != null && Number(as.growthRate) !== p.rates[as.type]);
+      const rates = getRiskRates(riskProfiles[k]);
+      if (!rates) return;
+      drift[k] = assets.some((as) => (as.owner || "client1") === k && rates[as.type] != null && Number(as.growthRate) !== rates[as.type]);
     });
     return drift;
-  }, [assets, riskProfiles]);
+  }, [assets, riskProfiles, riskRateOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
   const riskOwnerKeys = couple ? ["client1", "client2", "joint"] : ["client1"];
   const riskOwnerLabel = (k) => (k === "joint" ? "Joint assets" : (profile[k].name || (k === "client1" ? "Client 1" : "Client 2")));
   const addOpen = (setter, rec) => { setter((p) => [...p, rec]); setOpen((s) => new Set(s).add(rec.id)); };
@@ -1099,7 +1217,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           {!present && (<>
             <select className="cur-sel num" value={cur} onChange={(e) => setProfile((p) => ({ ...p, currency: e.target.value }))}>{Object.values(CURRENCIES).map((c) => <option key={c.code} value={c.code}>{c.symbol} {c.code}</option>)}</select>
             <button className="icon-btn" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
-            <button className="report-btn" onClick={() => setReportOpen(true)}><FileText size={15} /><span>Report</span></button>
+            <button className="report-btn" onClick={() => { setReportStage("options"); setReportOpen(true); }}><FileText size={15} /><span>Report</span></button>
           </>)}
           <button className="btn-primary" onClick={() => setPresent(!present)}>{present ? <Minimize2 size={15} /> : <Maximize2 size={15} />}<span>{present ? "Exit client view" : "Client view"}</span></button>
         </div>
@@ -1146,7 +1264,23 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                       <Pick value={riskProfiles[k] || ""} onChange={(v) => applyRiskProfile(k, v)} options={[{ value: "", label: "Custom / not set" }, ...RISK_PROFILES.map((p) => ({ value: p.id, label: p.label }))]} />
                     </div>
                   ))}
-                  <span className="field-note">{couple ? "Different profiles per client let you show what-if comparisons — e.g. one Cautious, one Growth. " : ""}Rates applied per asset type: {RISK_PROFILES.map((p) => `${p.label} ${p.rates.investment}%`).join(" · ")} (investments/pensions; cash and property scaled accordingly).</span>
+                  <span className="field-note">{couple ? "Different profiles per client let you show what-if comparisons — e.g. one Cautious, one Growth. " : ""}Rates applied per asset type: {RISK_PROFILES.map((p) => `${p.label} ${getRiskRates(p.id).investment}%`).join(" · ")} (investments/pensions; cash and property scaled accordingly).</span>
+                  <div className="risk-tools">
+                    <button className="xc-btn" onClick={() => setRiskEditOpen((v) => !v)}>{riskEditOpen ? "Done editing rates" : "Edit template rates"}{riskRatesCustomised && !riskEditOpen ? " · customised" : ""}</button>
+                    {riskRatesCustomised && riskEditOpen && <button className="xc-btn" onClick={resetRiskRates}>Reset to defaults</button>}
+                  </div>
+                  {riskEditOpen && (
+                    <div className="risk-editor">
+                      <div className="risk-ed-row risk-ed-head"><span /><span>Cash</span><span>Invest</span><span>Pension</span><span>Property</span></div>
+                      {RISK_PROFILES.map((p) => { const r = getRiskRates(p.id); return (
+                        <div className="risk-ed-row" key={p.id}>
+                          <span className="risk-ed-name">{p.label}</span>
+                          {["cash", "investment", "pension", "property"].map((ty) => <Mini key={ty} value={r[ty]} step={0.1} suffix="%" onChange={(v) => setRiskRate(p.id, ty, v)} />)}
+                        </div>
+                      ); })}
+                      <span className="field-note">Your house assumptions — saved on this device and used whenever a profile is applied. Changing a rate here doesn't alter existing plans until a profile is re-applied.</span>
+                    </div>
+                  )}
                 </div>
                 <p className="ed-hint">Per-asset growth is set on each asset. Mortality is set per client. Charges &amp; fees module is next once we map your fee structure.</p>
               </div>
@@ -1340,6 +1474,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             {section === "notes" && (
               <div className="ed-body">
                 <h2 className="ed-title">Adviser notes</h2>
+                <div className="notes-tools"><button className="xc-btn" onClick={() => setAdviserNotes((n) => (n ? n.replace(/\s*$/, "") + "\n\n" : "") + new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) + " — ")}>+ Insert today's date</button></div>
                 <textarea
                   className="notes-area"
                   value={adviserNotes}
@@ -1580,60 +1715,186 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
         )}
         {reportOpen && (() => {
           const reportDate = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
-          const clientName = couple ? `${c1.name || "Client 1"} & ${c2.name || "Client 2"}` : (c1.name || "Client");
+          const anon = reportCfg.anonymous;
+          const dn1 = anon ? "Client 1" : (c1.name || "Client 1");
+          const dn2 = anon ? "Client 2" : (c2.name || "Client 2");
+          const dfn1 = anon ? "Client 1" : fn1, dfn2 = anon ? "Client 2" : fn2;
+          const clientName = couple ? `${dn1} & ${dn2}` : dn1;
           const retRow = data.find((r) => r.c1Age === ectx.retC1);
           const basis = showReal ? "Today's money (real terms)" : "Future money (nominal terms)";
-          const ownerLabel = (o) => (o === "joint" ? "Joint" : o === "client2" ? fn2 : fn1);
-          const insuredLabel = (o) => (o === "client2" ? fn2 : fn1);
+          const ownerLabel = (o) => (o === "joint" ? "Joint" : o === "client2" ? dfn2 : dfn1);
+          const insuredLabel = (o) => (o === "client2" ? dfn2 : dfn1);
           const anchorTxt = (a) => { if (!a) return "—"; if (a.mode === "now") return "Start"; if (a.mode === "retirement") return "Retirement"; if (a.mode === "end") return "End of plan"; if (a.mode === "age") return `Age ${a.age}`; return "—"; };
           const escTxt = (it) => (it.escalation === "inflation" ? `Inflation (${assumptions.inflation}%)` : it.escalation === "custom" ? `${it.customEsc || 0}%` : "None");
           const freqTxt = (it) => (it.frequency === "monthly" ? "Monthly" : it.frequency === "oneoff" ? "One-off" : it.frequency === "everyN" ? `Every ${it.everyYears || 1} yrs` : "Annual");
           const m = (v) => fmtFull(v, cur);
+          const S = reportCfg.sections;
+          const SECTION_DEFS = [
+            { id: "exec", label: "Executive summary" },
+            { id: "snapshot", label: "Financial snapshot" },
+            { id: "charts", label: "Projection charts" },
+            { id: "cashgap", label: "Cash gap analysis" },
+            { id: "stress", label: "Stress test result", off: !stressActive, why: "no stress test active" },
+            { id: "protection", label: "Protection snapshot", off: protection.length === 0, why: "no policies entered" },
+            { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
+            { id: "inputs", label: "Detailed inputs", },
+            { id: "assumptions", label: "Assumptions" },
+            { id: "commentary", label: "Commentary" },
+          ];
+          const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
+          const setPreset = (kind) => {
+            const brief = { exec: true, snapshot: false, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, commentary: false };
+            const comp = { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, commentary: true };
+            upReportCfg({ sections: kind === "brief" ? brief : comp });
+          };
           const verdictText = kpis.depletionAge === null
             ? `Based on the assumptions set out in this report, the plan remains fully funded throughout, with approximately ${m(kpis.endVal)} of net worth remaining at the end of the plan in ${kpis.endYear}.`
-            : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. Adjusting contributions, retirement age or planned spending would close this gap.`;
+            : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The size of the gap is sensitive to contributions, retirement age and planned spending.`;
           const longevity = kpis.depletionAge === null ? "Funded for life" : `Funds to age ${kpis.depletionAge}`;
+          const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
+          const assetMix = (() => { const by = {}; assets.forEach((a) => { by[a.type] = (by[a.type] || 0) + (Number(a.value) || 0); }); return Object.entries(by).filter(([, v]) => v > 0).map(([type, value]) => ({ type, value, name: TYPE_LABEL[type] })); })();
+          const y0 = rows[0] || {}; const inc0 = y0.income || 0; const exp0 = y0.expenditure || 0;
+
+          /* ---------- Stage 1: options modal ---------- */
+          if (reportStage === "options") return (
+            <div className="modal-scrim" onClick={() => setReportOpen(false)}>
+              <div className="modal report-modal" onClick={(e) => e.stopPropagation()}>
+                <h3 className="modal-title">Generate report</h3>
+                <div className="rcfg-presets">
+                  <button className="xc-btn" onClick={() => setPreset("brief")}>Brief</button>
+                  <button className="xc-btn" onClick={() => setPreset("comprehensive")}>Comprehensive</button>
+                  <span className="rcfg-presets-note">presets — fine-tune below</span>
+                </div>
+                <div className="rcfg-grid">
+                  {SECTION_DEFS.map((d) => (
+                    <label key={d.id} className={`rcfg-row ${d.off ? "off" : ""}`}>
+                      <input type="checkbox" disabled={!!d.off} checked={!!S[d.id] && !d.off} onChange={(e) => upReportCfg({ sections: { [d.id]: e.target.checked } })} />
+                      <span>{d.label}{d.off && d.why ? <em> — {d.why}</em> : null}</span>
+                    </label>
+                  ))}
+                  <label className="rcfg-row locked"><input type="checkbox" checked disabled /><span>Cover page &amp; disclaimers <em>— always included</em></span></label>
+                </div>
+                <div className="rcfg-line">
+                  <label className="rcfg-row"><input type="checkbox" checked={anon} onChange={(e) => upReportCfg({ anonymous: e.target.checked })} /><span>Hide client names <em>— shows "Client 1 / Client 2" and ages instead of names and dates of birth</em></span></label>
+                </div>
+                <div className="rcfg-id">
+                  <div className="rec-field"><label>Prepared by</label><Text value={reportCfg.adviser} placeholder="Adviser name" onChange={(v) => upReportCfg({ adviser: v })} /></div>
+                  <div className="rec-field"><label>Firm</label><Text value={reportCfg.firm} placeholder="Firm name (optional)" onChange={(v) => upReportCfg({ firm: v })} /></div>
+                </div>
+                {on("commentary") && (
+                  <div className="rcfg-comm">
+                    <div className="rcfg-comm-head"><label className="flbl">Commentary <InfoTip text="Generated by the planning engine from this plan's numbers — deterministic, observational language only, never advice. Edit freely or replace it with your own; Reset returns to the generated text." /></label>{commentaryEdit !== null && <button className="xc-btn" onClick={() => setCommentaryEdit(null)}>Reset to generated</button>}</div>
+                    <textarea className="notes-area rcfg-comm-area" value={commentaryText} onChange={(e) => setCommentaryEdit(e.target.value)} />
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <button className="wi-reset" onClick={() => setReportOpen(false)}>Cancel</button>
+                  <button className="goal-btn" onClick={() => setReportStage("view")}>Generate report</button>
+                </div>
+              </div>
+            </div>
+          );
+
+          /* ---------- Stage 2: report view ---------- */
           return (
             <div className="report-overlay">
               <div className="report-toolbar report-no-print">
                 <span className="report-tb-title"><FileText size={15} /> Plan report — {clientName}</span>
                 <div style={{ display: "flex", gap: 8 }}>
+                  <button className="wi-reset" onClick={() => setReportStage("options")}>Options</button>
+                  <button className="wi-reset" onClick={() => {
+                    const sumLines = [
+                      `Cashflow plan — ${clientName} (${reportDate})`,
+                      verdictText,
+                      `Net worth today: ${m(kpis.currentTotal)} · At retirement: ${m(kpis.atRetirement)} · End of plan (${kpis.endYear}): ${m(kpis.endVal)} · ${longevity}`,
+                      cashGap && !cashGap.none && !cashGap.oneOffOnly ? `Sustained draw on savings begins ${cashGap.firstYear} (~${m(cashGap.avgDraw)}/yr).` : cashGap && cashGap.oneOffOnly ? `Savings used for one-off costs only (${cashGap.isolatedYears.join(", ")}).` : `Income covers spending throughout — savings never drawn upon.`,
+                      `Figures in ${basis.toLowerCase()}. Illustration only — not financial advice.`,
+                    ].filter(Boolean).join("\n\n");
+                    navigator.clipboard && navigator.clipboard.writeText(sumLines).then(() => { setCopiedSummary(true); setTimeout(() => setCopiedSummary(false), 1800); });
+                  }}>{copiedSummary ? "Copied ✓" : "Copy summary"}</button>
                   <button className="goal-btn" onClick={() => window.print()}>Print / Save as PDF</button>
                   <button className="wi-reset" onClick={() => setReportOpen(false)}>Close</button>
                 </div>
               </div>
               <div className="report-sheet">
 
-                {/* Page 1 — cover + summary */}
+                {/* Cover + verdict */}
                 <section className="report-page">
                   <div className="rep-cover">
                     <div className="rep-cover-mark"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 20 L9 12 L13 15 L21 4" fill="none" stroke="#2e9e6b" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /><circle cx="21" cy="4" r="2.3" fill="#2e9e6b" /></svg> Cashflow plan</div>
                     <h1 className="rep-h1">{clientName}</h1>
-                    <div className="rep-meta">Prepared {reportDate} · Figures in {basis} · Currency {cur}</div>
+                    <div className="rep-meta">Prepared {reportDate}{reportCfg.adviser ? ` by ${reportCfg.adviser}` : ""}{reportCfg.firm ? `, ${reportCfg.firm}` : ""} · Figures in {basis} · Currency {cur}</div>
                   </div>
-
                   <div className={`rep-verdict rep-${banner.tone}`}>
                     <div className="rep-verdict-tag">{kpis.depletionAge === null ? "Fully funded" : kpis.tone === "red" ? "At risk" : "Caution"}</div>
                     <div className="rep-verdict-text">{verdictText}</div>
                   </div>
-
                   <div className="rep-kpis">
                     <div className="rep-kpi"><span>Net worth today</span><b className="num">{m(kpis.currentTotal)}</b></div>
                     <div className="rep-kpi"><span>At retirement</span><b className="num">{m(kpis.atRetirement)}</b></div>
                     <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
                     <div className="rep-kpi"><span>Plan longevity</span><b className="num">{longevity}</b></div>
                   </div>
-
                   <div className="rep-people">
-                    <div className="rep-person"><b>{fn1}</b><span>Born {c1.dob} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
-                    {couple && <div className="rep-person"><b>{fn2}</b><span>Born {c2.dob} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</span></div>}
+                    <div className="rep-person"><b>{dfn1}</b><span>{anon ? `Age ${ectx.age0c1}` : `Born ${c1.dob}`} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
+                    {couple && <div className="rep-person"><b>{dfn2}</b><span>{anon ? `Age ${ectx.age0c2}` : `Born ${c2.dob}`} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</span></div>}
                   </div>
+                  <RepFoot />
                 </section>
 
-                {/* Page 2 — net worth chart */}
+                {/* Executive summary */}
+                {on("exec") && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Executive summary</h2>
+                    <p className="rep-p rep-lede">{verdictText}</p>
+                    <div className="rep-exec-grid">
+                      <div className="rep-exec-item"><span>Annual income today</span><b className="num">{m(inc0)}</b></div>
+                      <div className="rep-exec-item"><span>Annual spending today</span><b className="num">{m(exp0)}</b></div>
+                      <div className="rep-exec-item"><span>Current position</span><b className="num">{inc0 - exp0 >= 0 ? `${m(inc0 - exp0)} surplus` : `${m(exp0 - inc0)} drawn from savings`}</b></div>
+                      {cashGap && !cashGap.none && !cashGap.oneOffOnly && <div className="rep-exec-item"><span>Sustained draw on savings begins</span><b className="num">{cashGap.firstYear}</b></div>}
+                      {cashGap && cashGap.oneOffOnly && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">One-off costs only ({cashGap.isolatedYears.length} year{cashGap.isolatedYears.length === 1 ? "" : "s"})</b></div>}
+                      {cashGap && cashGap.none && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">None — income covers spending throughout</b></div>}
+                      <div className="rep-exec-item"><span>Projected estate ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
+                    </div>
+                    <p className="rep-p">This summary describes the projection under the stated assumptions. It is not a recommendation; figures will differ if actual returns, inflation, income or spending differ from those assumptions.</p>
+                    {stressActive && <p className="rep-p rep-small">A stress scenario is currently active. The figures on this page describe the base plan; the projection charts and the stress test page reflect the scenario.</p>}
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Financial snapshot */}
+                {on("snapshot") && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Financial snapshot — today</h2>
+                    <div className="rep-snap">
+                      <div className="rep-snap-pie">
+                        <PieChart width={300} height={220}>
+                          <Pie data={assetMix} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={48} outerRadius={86} paddingAngle={2} isAnimationActive={false}>
+                            {assetMix.map((e) => <Cell key={e.type} fill={typeSwatch(e.type)} />)}
+                          </Pie>
+                        </PieChart>
+                        <div className="rep-legend">{assetMix.map((e) => <span key={e.type}><i style={{ background: typeSwatch(e.type) }} /> {e.name} · {m(e.value)}</span>)}</div>
+                      </div>
+                      <table className="rep-table rep-snap-table">
+                        <tbody>
+                          <tr><td>Gross assets</td><td className="r num">{m(assets.reduce((s, a) => s + (Number(a.value) || 0), 0))}</td></tr>
+                          {hasDebt && <tr><td>Less: liabilities</td><td className="r num">−{m(liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0))}</td></tr>}
+                          <tr><td><b>Net worth</b></td><td className="r num"><b>{m(kpis.currentTotal)}</b></td></tr>
+                          <tr><td>Annual income</td><td className="r num">{m(inc0)}</td></tr>
+                          <tr><td>Annual spending</td><td className="r num">{m(exp0)}</td></tr>
+                          <tr><td>{inc0 - exp0 >= 0 ? "Annual surplus" : "Annual draw on savings"}</td><td className="r num">{m(Math.abs(inc0 - exp0))}</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Charts */}
+                {on("charts") && (<>
                 <section className="report-page">
                   <h2 className="rep-h2">Projected net worth</h2>
-                  <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.</p>
+                  <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.{stressActive ? " A stress scenario is active — see the stress test page." : ""}</p>
                   <div className="rep-chart">
                     <ComposedChart width={700} height={330} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
                         <CartesianGrid stroke="#eceff3" vertical={false} />
@@ -1651,9 +1912,8 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                     {hasProperty && <span><i className="rep-dash" /> Spendable (excl. property)</span>}
                     {hasDebt && <span><i className="rep-solid" /> Net worth after debts</span>}
                   </div>
+                  <RepFoot />
                 </section>
-
-                {/* Page 3 — money in vs out */}
                 <section className="report-page">
                   <h2 className="rep-h2">Money in versus money out</h2>
                   <p className="rep-p">Annual income by source against total spending (the line). Where spending exceeds income, the shortfall is drawn from savings.</p>
@@ -1676,9 +1936,114 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                     <span><i className="rep-solid" /> Total spending</span>
                     {hasContrib && <span><i className="rep-dash" /> + savings/contributions</span>}
                   </div>
+                  <RepFoot />
                 </section>
+                </>)}
 
-                {/* Page 4 — assets & income */}
+                {/* Cash gap */}
+                {on("cashgap") && cashGap && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Cash gap analysis</h2>
+                    {cashGap.none ? (
+                      <p className="rep-p rep-lede">Income covers spending in every year of the plan. Savings and investments are never drawn upon under the current assumptions.</p>
+                    ) : cashGap.oneOffOnly ? (<>
+                      <p className="rep-p rep-lede">Income covers <b>regular</b> spending in every year of the plan. Savings are drawn on only for one-off costs.</p>
+                      <table className="rep-table">
+                        <tbody>
+                          <tr><td>Years with a one-off draw</td><td className="r num">{cashGap.isolatedYears.join(", ")}</td></tr>
+                          <tr><td>Largest draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
+                          <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
+                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</td></tr>}
+                        </tbody>
+                      </table>
+                      <p className="rep-p">These appear as isolated orange bars on the money chart; there is no sustained reliance on savings. Figures in {basis.toLowerCase()}.</p>
+                    </>) : (<>
+                      <p className="rep-p rep-lede">From <b className="num">{cashGap.firstYear}</b>, spending begins to exceed income. The gap is met by drawing on savings and investments.</p>
+                      <table className="rep-table">
+                        <tbody>
+                          <tr><td>First sustained draw on savings</td><td className="r num">{cashGap.firstYear}</td></tr>
+                          <tr><td>Typical annual draw (first five years)</td><td className="r num">{m(cashGap.avgDraw)}</td></tr>
+                          <tr><td>Largest annual draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
+                          <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
+                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</td></tr>}
+                        </tbody>
+                      </table>
+                      <p className="rep-p">{cashGap.uncoveredCount > 0 ? "Where the gap cannot be met, spending in those years exceeds both income and remaining accessible assets — shown in red on the money chart." : "Every gap year is fully met from accessible assets under the current assumptions."} Figures in {basis.toLowerCase()}.</p>
+                    </>)}
+                    {stressActive && <p className="rep-p rep-small">Computed on the base plan — the active stress scenario is reported on its own page.</p>}
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Stress test */}
+                {on("stress") && stressImpact && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Stress test</h2>
+                    <p className="rep-p rep-lede">Scenario applied: <b>{stressImpact.label}</b></p>
+                    <table className="rep-table">
+                      <tbody>
+                        <tr><td>Base plan</td><td className="r">{stressImpact.baseAge ? `Funds to age ${stressImpact.baseAge}` : "Funded for life"}</td></tr>
+                        <tr><td>Under this scenario</td><td className="r">{stressImpact.stressAge ? `Funds to age ${stressImpact.stressAge}` : "Still funded for life"}</td></tr>
+                      </tbody>
+                    </table>
+                    <p className="rep-p">{!stressImpact.stressAge ? "Under this scenario the plan remains funded to the end of the projection." : stressImpact.baseAge ? `The scenario brings the projected depletion forward from age ${stressImpact.baseAge} to age ${stressImpact.stressAge}.` : `The scenario moves the plan from fully funded to depleting at age ${stressImpact.stressAge}.`} This is a what-if illustration of resilience, not a prediction.</p>
+                    <div className="rep-chart">
+                      <ComposedChart width={700} height={260} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                        <CartesianGrid stroke="#eceff3" vertical={false} />
+                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
+                        <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
+                        <Line type="monotone" dataKey="netWorth" stroke="#161b22" strokeWidth={1.7} dot={false} isAnimationActive={false} />
+                        <Line type="monotone" dataKey="stressed" stroke="#d64545" strokeWidth={1.7} strokeDasharray="6 3" dot={false} isAnimationActive={false} />
+                      </ComposedChart>
+                    </div>
+                    <div className="rep-legend"><span><i className="rep-solid" /> Base plan net worth</span><span><i className="rep-dash" style={{ background: "#d64545" }} /> Under the scenario</span></div>
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Protection snapshot */}
+                {on("protection") && protSnap && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Protection snapshot</h2>
+                    <table className="rep-table">
+                      <thead><tr><th>Policy</th><th>Insured</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
+                      <tbody>{protection.map((p2) => <tr key={p2.id}><td>{p2.name}</td><td>{insuredLabel(p2.insured)}</td><td className="r num">{m(Number(p2.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p2.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p2.coverToAge) >= 110 ? "Whole of life" : `Age ${p2.coverToAge}`}</td></tr>)}</tbody>
+                    </table>
+                    {Object.entries(protSnap.per).map(([k, v]) => (
+                      <p className="rep-p" key={k}><b>{insuredLabel(k)}:</b> {v.count} polic{v.count === 1 ? "y" : "ies"} totalling {m(v.total)} of cover, costing {sym}{v.prem.toLocaleString()}/month.</p>
+                    ))}
+                    {protSnap.firstDeath && (
+                      <p className="rep-p">{protSnap.firstDeath.payout > 0
+                        ? `At the first death assumed in this plan (${insuredLabel(protSnap.firstDeath.who)}, ${protSnap.firstDeath.year}), cover totalling ${m(protSnap.firstDeath.payout)} pays out — this payment is included in the projection.`
+                        : `At the first death assumed in this plan (${insuredLabel(protSnap.firstDeath.who)}, ${protSnap.firstDeath.year}), no recorded cover pays out — the policy terms end before that age.`}</p>
+                    )}
+                    <p className="rep-p">This section records the cover in force and how it interacts with this projection. A full protection-needs analysis is a separate exercise.</p>
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* What-if answers */}
+                {on("whatif") && goal && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">"What if I asked…"</h2>
+                    <p className="rep-p">Single-question answers computed from this plan. Each changes one input only, holding everything else constant — read the note beneath the table.</p>
+                    <table className="rep-table">
+                      <tbody>
+                        <tr><td>How much could I spend each year and still be funded for life?</td><td className="r num">{goal.maxSpend != null ? `~${m(goal.maxSpend)}/yr` : "—"}</td></tr>
+                        <tr><td>When could I retire at today's spending?</td><td className="r num">{goal.earliestRetAge != null ? `Age ${goal.earliestRetAge}` : "—"}</td></tr>
+                        <tr><td>Largest one-off purchase today, staying funded?</td><td className="r num">{goal.maxOneOff != null ? (goal.maxOneOff >= 5000000 ? "Over " + m(5000000) : `~${m(goal.maxOneOff)}`) : "—"}</td></tr>
+                        <tr><td>Largest new permanent monthly cost, staying funded?</td><td className="r num">{goal.maxMonthly != null ? `~${sym}${Math.round(goal.maxMonthly).toLocaleString()}/mo` : "—"}</td></tr>
+                        {!goal.to100 && goal.growth != null && <tr><td>Return uplift needed to fully fund the plan</td><td className="r num">+{goal.growth.toFixed(1)} pts on all assets</td></tr>}
+                        <tr><td>Projected estate at the end of the plan</td><td className="r num">{m(goal.estateEnd)} ({goal.estateEndYear})</td></tr>
+                      </tbody>
+                    </table>
+                    <p className="rep-p rep-small">Each answer adjusts a single lever in isolation and assumes it stays constant over time; combining changes gives different results. The one-off figure does not test the accessibility or tax treatment of specific assets. These are planning illustrations, not recommendations.</p>
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Detailed inputs */}
+                {on("inputs") && (<>
                 <section className="report-page">
                   <h2 className="rep-h2">Assets</h2>
                   <table className="rep-table">
@@ -1689,7 +2054,6 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                       ))}
                     </tbody>
                   </table>
-
                   <h2 className="rep-h2" style={{ marginTop: 26 }}>Income</h2>
                   <table className="rep-table">
                     <thead><tr><th>Source</th><th>Owner</th><th className="r">Amount</th><th>Frequency</th><th>From</th><th>To</th><th>Increases</th></tr></thead>
@@ -1699,9 +2063,8 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                       ))}
                     </tbody>
                   </table>
+                  <RepFoot />
                 </section>
-
-                {/* Page 5 — expenses, liabilities, protection, assumptions */}
                 <section className="report-page">
                   <h2 className="rep-h2">Expenditure</h2>
                   <table className="rep-table">
@@ -1712,7 +2075,6 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                       ))}
                     </tbody>
                   </table>
-
                   {liabilities.length > 0 && <>
                     <h2 className="rep-h2" style={{ marginTop: 26 }}>Liabilities</h2>
                     <table className="rep-table">
@@ -1720,36 +2082,48 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                       <tbody>{liabilities.map((L) => <tr key={L.id}><td>{L.name}</td><td>{ownerLabel(L.owner)}</td><td className="r num">{m(Number(L.balance) || 0)}</td><td className="r num">{Number(L.rate) || 0}%</td><td className="r num">{sym}{(Number(L.monthlyPayment) || 0).toLocaleString()}</td></tr>)}</tbody>
                     </table>
                   </>}
-
-                  {protection.length > 0 && <>
-                    <h2 className="rep-h2" style={{ marginTop: 26 }}>Protection</h2>
-                    <table className="rep-table">
-                      <thead><tr><th>Policy</th><th>Insured</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
-                      <tbody>{protection.map((p) => <tr key={p.id}><td>{p.name}</td><td>{insuredLabel(p.insured)}</td><td className="r num">{m(Number(p.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p.coverToAge) >= 110 ? "Whole of life" : `Age ${p.coverToAge}`}</td></tr>)}</tbody>
-                    </table>
-                  </>}
-
-                  <h2 className="rep-h2" style={{ marginTop: 26 }}>Key assumptions</h2>
-                  <table className="rep-table">
-                    <tbody>
-                      <tr><td>Inflation</td><td className="r num">{assumptions.inflation}%</td></tr>
-                      {couple && <tr><td>Surviving partner's spending</td><td className="r num">{assumptions.survivorExpenseFactor}% of joint costs</td></tr>}
-                      <tr><td>Tax treatment</td><td className="r">{assumptions.tax && assumptions.tax.enabled ? "Illustrative tax applied (see note)" : "Not applied — figures as entered"}</td></tr>
-                      <tr><td>Figures shown in</td><td className="r">{basis}</td></tr>
-                    </tbody>
-                  </table>
+                  <RepFoot />
                 </section>
+                </>)}
 
-                {/* Page 6 — notes & disclaimer */}
+                {/* Assumptions */}
+                {on("assumptions") && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Key assumptions</h2>
+                    <table className="rep-table">
+                      <tbody>
+                        <tr><td>Inflation</td><td className="r num">{assumptions.inflation}%</td></tr>
+                        {couple && <tr><td>Surviving partner's spending</td><td className="r num">{assumptions.survivorExpenseFactor}% of joint costs</td></tr>}
+                        {riskOwnerKeys.map((k) => { const pid = riskProfiles[k]; const pr = riskProfileById(pid); return pr ? <tr key={k}><td>Risk profile — {k === "joint" ? "Joint assets" : (anon ? (k === "client1" ? "Client 1" : "Client 2") : riskOwnerLabel(k))}</td><td className="r">{pr.label}{riskDrift[k] ? " (since edited per asset)" : ""}</td></tr> : null; })}
+                        <tr><td>Tax treatment</td><td className="r">{assumptions.tax && assumptions.tax.enabled ? "Illustrative tax applied (see note)" : "Not applied — figures as entered"}</td></tr>
+                        <tr><td>Figures shown in</td><td className="r">{basis}</td></tr>
+                      </tbody>
+                    </table>
+                    {annotations.length > 0 && <>
+                      <h2 className="rep-h2" style={{ marginTop: 26 }}>Plan timeline notes</h2>
+                      <ul className="rep-notes">{annotations.slice().sort((a, b) => a.year - b.year).map((n) => <li key={n.id}><b className="num">{n.year}</b> — {n.text || "Note"}</li>)}</ul>
+                    </>}
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Commentary */}
+                {on("commentary") && commentaryText && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Commentary</h2>
+                    {commentaryText.split(/\n\n+/).map((para, i) => <p className="rep-p" key={i}>{para}</p>)}
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Disclaimers — always */}
                 <section className="report-page report-last">
-                  {annotations.length > 0 && <>
-                    <h2 className="rep-h2">Adviser notes</h2>
-                    <ul className="rep-notes">{annotations.slice().sort((a, b) => a.year - b.year).map((n) => <li key={n.id}><b className="num">{n.year}</b> — {n.text || "Note"}</li>)}</ul>
-                  </>}
-                  <h2 className="rep-h2" style={{ marginTop: annotations.length ? 26 : 0 }}>Important information</h2>
-                  <p className="rep-disc">This report is an illustration based on the assumptions and figures shown above, which have been provided or agreed with you. It is not a guarantee of future outcomes. Investment growth is assumed and actual returns will vary; values can fall as well as rise.</p>
-                  <p className="rep-disc">Any tax figures shown are illustrative only and do not constitute tax advice. Tax treatment depends on individual circumstances and on the rules of each relevant jurisdiction, which may change. You should obtain advice from a qualified tax specialist before acting.</p>
-                  <p className="rep-disc">This document does not constitute a personal recommendation. Please discuss any decisions with your financial adviser.</p>
+                  <h2 className="rep-h2">Important information</h2>
+                  <p className="rep-disc">This report is an illustration based on the assumptions and figures shown above, which have been provided or agreed with you. It is not a guarantee of future outcomes. Investment growth is assumed and actual returns will vary; values can fall as well as rise, and past performance is not indicative of future results.</p>
+                  <p className="rep-disc">Any tax figures shown are illustrative only and do not constitute tax advice. Tax treatment depends on individual circumstances and on the rules of each relevant jurisdiction, which may change. Advice should be obtained from a qualified tax specialist before acting.</p>
+                  <p className="rep-disc">Any commentary in this report describes the projection and its inputs. It is analysis of the plan as entered, not a personal recommendation, and no part of this document constitutes financial advice. Please discuss any decisions with your financial adviser.</p>
+                  <p className="rep-disc">Currency: {cur}. Figures in {basis.toLowerCase()}. Prepared {reportDate}{reportCfg.adviser ? ` by ${reportCfg.adviser}` : ""}{reportCfg.firm ? `, ${reportCfg.firm}` : ""}.</p>
+                  <RepFoot />
                 </section>
 
               </div>
@@ -1834,6 +2208,12 @@ const CSS = `
 .risk-block{display:flex;flex-direction:column;gap:8px;margin-top:14px;}
 .risk-row{display:flex;flex-direction:column;gap:4px;}
 .risk-edited{font-style:normal;color:var(--amber);font-weight:600;}
+.risk-tools{display:flex;gap:8px;margin-top:4px;}
+.risk-editor{display:flex;flex-direction:column;gap:7px;border:1px solid var(--border);border-radius:11px;padding:12px 14px;margin-top:6px;}
+.risk-ed-row{display:grid;grid-template-columns:78px repeat(4,1fr);gap:7px;align-items:center;}
+.risk-ed-head span{font-size:10.5px;color:var(--low);font-weight:600;}
+.risk-ed-name{font-size:12.5px;font-weight:600;color:var(--ink);}
+.notes-tools{margin-bottom:8px;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
@@ -1998,6 +2378,34 @@ const CSS = `
 .infotip-btn:hover,.infotip-btn:focus-visible{color:var(--accent);}
 .infotip-inline{display:block;margin-top:5px;font-size:11px;font-weight:400;color:var(--mid);line-height:1.45;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 9px;text-align:left;}
 .modal-scrim{position:fixed;inset:0;background:rgba(15,20,28,.42);display:flex;align-items:center;justify-content:center;padding:20px;z-index:200;backdrop-filter:blur(2px);}
+/* Report options modal */
+.report-modal{width:min(640px,100%);}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}
+.rcfg-presets{display:flex;align-items:center;gap:8px;margin:10px 0 12px;}
+.rcfg-presets-note{font-size:11.5px;color:var(--low);}
+.rcfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;border:1px solid var(--border);border-radius:11px;padding:12px 14px;}
+.rcfg-row{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--ink);cursor:pointer;}
+.rcfg-row input{margin-top:2px;accent-color:#2e9e6b;}
+.rcfg-row em{font-style:normal;color:var(--low);font-size:11.5px;}
+.rcfg-row.off{opacity:.55;cursor:default;}
+.rcfg-row.locked{opacity:.7;cursor:default;}
+.rcfg-line{margin-top:10px;}
+.rcfg-id{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;}
+.rcfg-comm{margin-top:14px;}
+.rcfg-comm-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
+.rcfg-comm-area{min-height:150px;font-size:12.5px;}
+/* New report elements */
+.rep-foot{margin-top:auto;padding-top:14px;font-size:9.5px;color:#9aa3ae;border-top:1px solid #eceff3;text-align:center;}
+.report-page{display:flex;flex-direction:column;}
+.rep-lede{font-size:14px;}
+.rep-small{font-size:10.5px;color:#6b7480;}
+.rep-exec-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0;}
+.rep-exec-item{border:1px solid #e3e7ec;border-radius:10px;padding:10px 13px;display:flex;flex-direction:column;gap:3px;}
+.rep-exec-item span{font-size:10.5px;color:#6b7480;}
+.rep-exec-item b{font-size:14px;color:#161b22;}
+.rep-snap{display:flex;gap:22px;align-items:flex-start;margin-top:8px;}
+.rep-snap-pie{display:flex;flex-direction:column;gap:6px;}
+.rep-snap-table{flex:1;}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.28);width:min(560px,100%);max-height:90vh;overflow-y:auto;padding:20px 22px 18px;}
 .modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px;}
 .modal-title{font-family:'Fraunces',serif;font-size:21px;font-weight:600;color:var(--ink);}
