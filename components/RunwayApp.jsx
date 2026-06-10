@@ -1251,7 +1251,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const riskOwnerKeys = couple ? ["client1", "client2", "joint"] : ["client1"];
   const riskOwnerLabel = (k) => (k === "joint" ? "Joint assets" : (profile[k].name || (k === "client1" ? "Client 1" : "Client 2")));
   const addOpen = (setter, rec, siblings) => {
-    setter((p) => [...p, rec]);
+    setter((p) => [rec, ...p]);
     setOpen((s) => { const n = new Set(s); (siblings || []).forEach((x) => n.delete(x.id)); n.add(rec.id); return n; });
     // bring the new record into view once it has rendered
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1363,7 +1363,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20 L9 12 L13 15 L21 4" fill="none" stroke={t.netStroke} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /><circle cx="21" cy="4" r="2.3" fill={t.netStroke} /></svg></div>
-          <div className="brand-text"><span className="brand-name">Runway</span><span className="brand-tag">{couple ? `${fn1} & ${fn2}` : "International cashflow forecasting"}</span></div>
+          <div className="brand-text"><span className="brand-name">Meridian</span><span className="brand-tag">{couple ? `${fn1} & ${fn2}` : "International cashflow forecasting"}</span></div>
         </div>
         <div className="topbar-tools">
           {!present && (<>
