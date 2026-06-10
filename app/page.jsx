@@ -55,7 +55,7 @@ function Dashboard() {
   return (
     <div className="shell">
       <div className="shell-top">
-        <div className="brand">Runway<small>{user?.email}</small></div>
+        <div className="brand">Meridian<small>{user?.email}</small></div>
         <div style={{ display: "flex", gap: 10 }}>
           <button className="btn btn-primary" onClick={onNew}>+ New client</button>
           <button className="btn" onClick={signOut}>Sign out</button>
