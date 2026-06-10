@@ -403,6 +403,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
 
     // life cover: pay the sum assured into the household pot in the year the insured dies (within cover term)
     protection.forEach((p) => {
+      if ((p.ptype || "life") === "ci") return; // critical-illness cover pays on claim, not on death
       const o = p.insured || "client1";
       const died = o === "client2" ? justDiedC2 : justDiedC1;
       const insAge = o === "client2" ? c2Age : c1Age;
@@ -880,6 +881,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     const c1Death = rows.find((r) => !r.aliveC1);
     const c2Death = couple ? rows.find((r) => !r.aliveC2) : null;
     protection.forEach((p) => {
+      if ((p.ptype || "life") === "ci") return;
       const o = p.insured || "client1";
       const dr = o === "client2" ? c2Death : c1Death;
       if (!dr) return;
@@ -943,11 +945,75 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
       const dr = rows.find((r) => r.year === markers.firstDeath);
       const who = dr && !dr.aliveC1 ? "client1" : "client2";
       const age = who === "client1" ? ectx.lifeC1 : ectx.lifeC2;
-      const paying = protection.filter((p) => p.insured === who && (Number(p.coverToAge) || 0) >= age);
+      const paying = protection.filter((p) => (p.ptype || "life") !== "ci" && p.insured === who && (Number(p.coverToAge) || 0) > age);
       firstDeath = { who, year: markers.firstDeath, payout: paying.reduce((s, p) => s + (Number(p.sumAssured) || 0), 0) };
     }
     return { per, firstDeath };
   }, [reportOpen, protection, couple, markers.firstDeath, rows, ectx]);
+
+  // ---- Protection gap analysis ----------------------------------------------------------------
+  // Two layers: (1) rule-of-thumb benchmarks (house multipliers × current income), and
+  // (2) the engine-driven survivor test — simulate death at a chosen age and solve for the
+  // additional lump sum at death that keeps the survivor's plan funded. Observational output only.
+  const PROT_MULT_KEY = "runway_prot_mult";
+  const [protMult, setProtMult] = useState(() => {
+    if (typeof window === "undefined") return { life: 10, ci: 3 };
+    try { return { life: 10, ci: 3, ...(JSON.parse(localStorage.getItem(PROT_MULT_KEY) || "{}") || {}) }; } catch { return { life: 10, ci: 3 }; }
+  });
+  const upProtMult = (patch) => setProtMult((m0) => { const n = { ...m0, ...patch }; try { localStorage.setItem(PROT_MULT_KEY, JSON.stringify(n)); } catch {} return n; });
+  const [deathAges, setDeathAges] = useState({ client1: null, client2: null }); // null = default (current age + 1)
+  const protGap = useMemo(() => {
+    if (section !== "protection" && !reportOpen) return null;
+    // Current annual income per person; joint-owned income split 50/50.
+    const annualNow = { client1: 0, client2: 0 };
+    incomes.forEach((i) => {
+      const o = i.owner || "client1";
+      const sAge = resolveAge(i.start || { mode: "now" }, o === "joint" ? "client1" : o, ectx);
+      const eAge = i.frequency === "oneoff" ? null : resolveAge(i.end || { mode: "end" }, o === "joint" ? "client1" : o, ectx);
+      const refAge = o === "client2" ? ectx.age0c2 : ectx.age0c1;
+      const active = i.frequency !== "oneoff" && i.frequency !== "everyN" && sAge <= refAge && (eAge === null || eAge > refAge);
+      if (!active) return;
+      const ann = (Number(i.amount) || 0) * (i.frequency === "monthly" ? 12 : 1);
+      if (o === "joint") { annualNow.client1 += ann / 2; annualNow.client2 += ann / 2; }
+      else annualNow[o] += ann;
+    });
+    const inForce = (k, ty) => protection.filter((p) => (p.insured || "client1") === k && (p.ptype || "life") === ty && (Number(p.coverToAge) || 0) >= (k === "client2" ? ectx.age0c2 : ectx.age0c1)).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+    const keys = couple ? ["client1", "client2"] : ["client1"];
+    const bench = keys.map((k) => {
+      const inc = annualNow[k];
+      const lifeNeed = inc * (Number(protMult.life) || 0), ciNeed = inc * (Number(protMult.ci) || 0);
+      const lifeHave = inForce(k, "life"), ciHave = inForce(k, "ci");
+      return { k, inc, lifeNeed, ciNeed, lifeHave, ciHave, lifeGap: Math.max(0, lifeNeed - lifeHave), ciGap: Math.max(0, ciNeed - ciHave) };
+    });
+    // Survivor test — couples only; simulate death at the chosen age via a life-expectancy override.
+    let survivor = null;
+    if (couple) {
+      const baseArgs = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
+      const deflTotal = (rs) => rs.reduce((s, r) => s + (r.shortfall || 0) / Math.pow(1 + inflDec, r.y), 0);
+      survivor = ["client1", "client2"].map((k) => {
+        const age0 = k === "client2" ? ectx.age0c2 : ectx.age0c1;
+        const lifeExp = k === "client2" ? ectx.lifeC2 : ectx.lifeC1;
+        const minAge = age0 + 1, maxAge = Math.max(minAge, lifeExp - 1);
+        const dAge = Math.min(maxAge, Math.max(minAge, Number(deathAges[k]) || minAge));
+        const prof2 = { ...profile, [k]: { ...profile[k], lifeExpectancy: dAge } };
+        const run = (extra) => projectCashflow({ ...baseArgs, profile: prof2, lumpSums: extra > 0 ? [{ year: dAge + 1 - age0, amount: extra }] : [] });
+        const rs = run(0);
+        const shortRows = rs.filter((r) => (r.shortfall || 0) > 0);
+        const funded = shortRows.length === 0;
+        const firstShortYear = funded ? null : shortRows[0].year;
+        const totalShortReal = funded ? 0 : deflTotal(rs);
+        const payout = protection.filter((p) => (p.ptype || "life") !== "ci" && (p.insured || "client1") === k && (Number(p.coverToAge) || 0) > dAge).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+        let closeGap = null;
+        if (!funded) {
+          let lo = 0, hi = 20000000;
+          if (run(hi).some((r) => r.shortfall > 0)) closeGap = Infinity;
+          else { for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (run(mid).some((r) => r.shortfall > 0)) lo = mid; else hi = mid; } closeGap = hi; }
+        }
+        return { k, dAge, minAge, maxAge, funded, firstShortYear, totalShortReal, payout, closeGap };
+      });
+    }
+    return { bench, survivor, annualNow };
+  }, [section, reportOpen, incomes, protection, couple, profile, assumptions, assets, expenses, liabilities, ectx, inflDec, protMult, deathAges]);
 
   // Deterministic commentary engine — observational language only, every number from the engine.
   const generatedCommentary = useMemo(() => {
@@ -989,13 +1055,15 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     if (gross > 0 && propVal / gross > 0.5) watch.push(`over half of total assets (${Math.round((propVal / gross) * 100)}%) is held in property, which the plan treats as non-spendable`);
     if (!protection.length && (couple || liabilities.length > 0)) watch.push("no life cover is currently recorded" + (liabilities.length ? " while liabilities are outstanding" : ""));
     if (couple && protSnap && protSnap.firstDeath && protSnap.firstDeath.payout === 0 && protection.length) watch.push(`the cover recorded does not extend to the first death in ${protSnap.firstDeath.year} (terms end earlier)`);
+    if (protGap) protGap.bench.forEach((b) => { const nm = b.k === "client2" ? n2 : n1; if (b.inc > 0 && b.lifeGap > 0) watch.push(`life cover for ${nm} is ${m(b.lifeGap)} below the ${protMult.life}× income benchmark`); if (b.inc > 0 && b.ciGap > 0 && b.ciHave === 0) watch.push(`no critical-illness cover is recorded for ${nm} (benchmark ${m(b.ciNeed)})`); });
+    if (protGap && protGap.survivor) protGap.survivor.forEach((sv) => { const nm = sv.k === "client2" ? n2 : n1; if (!sv.funded && sv.closeGap != null) watch.push(`if ${nm} died at age ${sv.dAge}, the survivor's plan runs short — additional cover of ${sv.closeGap === Infinity ? "over " + m(20000000) : "~" + m(Math.ceil(sv.closeGap / 10000) * 10000)} would close the gap`); });
     if (cashGap && !cashGap.none && cashGap.uncoveredCount > 0) watch.push(`${cashGap.uncoveredCount} year${cashGap.uncoveredCount === 1 ? "" : "s"} show spending that cannot be met from income or savings, starting ${cashGap.firstUncoveredYear}`);
     const incOwners = new Set(incomes.filter((i) => (Number(i.amount) || 0) > 0).map((i) => i.owner || "client1"));
     if (couple && incOwners.size === 1 && incomes.length > 0) watch.push(`all recorded income belongs to ${incOwners.has("client2") ? n2 : n1}`);
     if (watch.length) paras.push("Watch points: " + watch.join("; ") + ".");
     paras.push(`All figures are ${showReal ? "in today's money (adjusted for inflation)" : "in future money (not adjusted for inflation)"} and reflect the assumptions listed in this report.${stressActive ? " They describe the base plan; the active stress scenario is reported separately." : ""} This commentary describes the projection — it is not a recommendation.`);
     return paras.join("\n\n");
-  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive]);
+  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive]);
   const commentaryText = commentaryEdit ?? generatedCommentary;
 
   const goal = useMemo(() => {
@@ -1457,8 +1525,9 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                           <label className="flbl">Name</label>
                           <input className="rec-name" value={p.name} onChange={(e) => upPol(p.id, { name: e.target.value })} placeholder="Name" />
                           {couple && <div className="rec-field"><label>Whose life is insured <InfoTip text="Life cover pays out when this person dies. In a couple, the lump sum lands in the survivor's plan." /></label><Pick value={p.insured || "client1"} onChange={(v) => upPol(p.id, { insured: v })} options={ownerOpts.filter((o) => o.value !== "joint")} /></div>}
+                          <div className="rec-field"><label>Policy type <InfoTip text="Life cover pays the sum assured on death — it lands in the survivor's plan. Critical-illness cover pays on diagnosis, not death; model a claim with the CI scenario in Stress test." /></label><Seg value={p.ptype || "life"} onChange={(v) => upPol(p.id, { ptype: v })} options={[{ value: "life", label: "Life" }, { value: "ci", label: "Critical illness" }]} /></div>
                           <div className="rec-grid">
-                            <div className="rec-field"><label>Sum assured <InfoTip text="The lump sum paid out on death. In a couple it boosts the survivor's assets; for a single client it forms part of the estate." /></label><Money value={p.sumAssured} symbol={sym} onChange={(v) => upPol(p.id, { sumAssured: v })} /></div>
+                            <div className="rec-field"><label>Sum assured <InfoTip text={(p.ptype || "life") === "ci" ? "The lump sum paid on a critical-illness claim. This is not paid on death — use the CI scenario in Stress test to model a claim." : "The lump sum paid out on death. In a couple it boosts the survivor's assets; for a single client it forms part of the estate."} /></label><Money value={p.sumAssured} symbol={sym} onChange={(v) => upPol(p.id, { sumAssured: v })} /></div>
                             <div className="rec-field"><label>Monthly premium</label><Money value={p.premium} symbol={sym} onChange={(v) => upPol(p.id, { premium: v })} /></div>
                           </div>
                           <div className="rec-field"><label>Cover until age <InfoTip text="Term assurance ends at this age — after it, premiums stop and there's no payout. For whole-of-life cover, set this high (e.g. 120)." /></label><Mini value={p.coverToAge} step={1} suffix={`(${insName || "insured"})`} onChange={(v) => upPol(p.id, { coverToAge: v })} /></div>
@@ -1468,7 +1537,49 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                     </div>
                   );
                 })}
-                <p className="ed-hint">Premiums are treated as spending while cover is in force. On the insured's death within the term, the sum assured is paid into the household pot{couple ? " — you'll see the survivor's net worth step up" : ""}. Critical-illness claim modelling is coming as a stress-test scenario.</p>
+                <p className="ed-hint">Premiums are treated as spending while cover is in force. On the insured's death within the term, the sum assured is paid into the household pot{couple ? " — you'll see the survivor's net worth step up" : ""}. Critical-illness policies pay on a claim, not on death — model a claim with the CI scenario in Stress test.</p>
+
+                {protGap && (
+                  <div className="pg-block">
+                    <div className="ed-head"><h2 className="ed-title">Protection gap analysis</h2></div>
+                    <label className="flbl">Rule-of-thumb benchmark <InfoTip text={`A widely used starting point: life cover of ${protMult.life}× annual income and critical-illness cover of ${protMult.ci}× annual income. Joint income is split equally between the couple. A benchmark is a conversation starter, not a needs analysis — the survivor test below is the real measure.`} /></label>
+                    {protGap.bench.map((b) => (
+                      <div className="pg-card" key={b.k}>
+                        <div className="pg-card-name">{riskOwnerLabel(b.k)}<span className="pg-inc num"> · income {sym}{Math.round(b.inc).toLocaleString()}/yr</span></div>
+                        <div className="pg-row"><span>Life cover — benchmark {protMult.life}×</span><span className="num">{fmtFull(b.lifeNeed, cur)}</span></div>
+                        <div className="pg-row"><span>Life cover in force</span><span className="num">{fmtFull(b.lifeHave, cur)}</span></div>
+                        <div className={`pg-row pg-verdict ${b.lifeGap > 0 ? "pg-gap" : "pg-ok"}`}><span>{b.lifeGap > 0 ? "Below benchmark by" : "Meets the benchmark"}</span><span className="num">{b.lifeGap > 0 ? fmtFull(b.lifeGap, cur) : "✓"}</span></div>
+                        <div className="pg-row" style={{ marginTop: 6 }}><span>Critical illness — benchmark {protMult.ci}×</span><span className="num">{fmtFull(b.ciNeed, cur)}</span></div>
+                        <div className="pg-row"><span>CI cover in force</span><span className="num">{fmtFull(b.ciHave, cur)}</span></div>
+                        <div className={`pg-row pg-verdict ${b.ciGap > 0 ? "pg-gap" : "pg-ok"}`}><span>{b.ciGap > 0 ? "Below benchmark by" : "Meets the benchmark"}</span><span className="num">{b.ciGap > 0 ? fmtFull(b.ciGap, cur) : "✓"}</span></div>
+                      </div>
+                    ))}
+                    <div className="pg-mult">
+                      <span className="field-note">Benchmark multipliers (house assumptions, saved on this device):</span>
+                      <div className="pg-mult-row"><label>Life ×</label><Mini value={protMult.life} step={1} onChange={(v) => upProtMult({ life: v })} /><label>CI ×</label><Mini value={protMult.ci} step={1} onChange={(v) => upProtMult({ ci: v })} /></div>
+                    </div>
+
+                    {couple && protGap.survivor && (
+                      <div className="pg-surv">
+                        <label className="flbl" style={{ marginTop: 14 }}>Survivor test <InfoTip text="The real measure. The engine re-runs the whole plan assuming death at the age you choose: income stops, the survivor's spending adjusts, assets transfer, and any in-term life cover pays out. If the survivor's plan runs short, the figure shown is the additional lump sum at death that would keep it funded — computed by the engine, not a rule of thumb." /></label>
+                        {protGap.survivor.map((sv) => (
+                          <div className="pg-card" key={sv.k}>
+                            <div className="pg-card-name">If {riskOwnerLabel(sv.k)} died at age <Mini value={sv.dAge} step={1} onChange={(v) => setDeathAges((d) => ({ ...d, [sv.k]: Math.min(sv.maxAge, Math.max(sv.minAge, Math.round(Number(v) || sv.minAge))) }))} /></div>
+                            <div className="pg-row"><span>Existing life cover paying out</span><span className="num">{fmtFull(sv.payout, cur)}</span></div>
+                            {sv.funded ? (
+                              <div className="pg-row pg-verdict pg-ok"><span>Survivor's plan stays funded to the end</span><span className="num">✓</span></div>
+                            ) : (<>
+                              <div className="pg-row pg-verdict pg-gap"><span>Survivor's plan runs short from {sv.firstShortYear}</span><span className="num">−{fmtFull(sv.totalShortReal, cur)} total</span></div>
+                              <div className="pg-row pg-close"><span>Additional cover that closes the gap</span><span className="num">{sv.closeGap === Infinity ? "Beyond " + fmtFull(20000000, cur) : "~" + fmtFull(Math.ceil(sv.closeGap / 10000) * 10000, cur)}</span></div>
+                            </>)}
+                          </div>
+                        ))}
+                        <span className="field-note">Shortfall totals are in today's money. "Closes the gap" is the smallest lump sum at death under which no year shows a shortfall — an analysis of this plan, not a recommendation.</span>
+                      </div>
+                    )}
+                    {!couple && <span className="field-note">The survivor test applies to couples. For a single client, the benchmark above plus liabilities and estate intentions frame the conversation.</span>}
+                  </div>
+                )}
               </div>
             )}
             {section === "notes" && (
@@ -1704,6 +1815,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   <div className="rec-field"><label>Age at claim</label><Mini value={ciDraft.age} step={1} onChange={(v) => setCiDraft((d) => ({ ...d, age: v }))} /></div>
                   <div className="rec-field"><label>Lump-sum payout</label><Money value={ciDraft.amount} symbol={sym} onChange={(v) => setCiDraft((d) => ({ ...d, amount: v }))} /></div>
                 </div>
+                {(() => { const ciCover = protection.filter((p) => (p.ptype || "life") === "ci" && (p.insured || "client1") === ciDraft.owner && (Number(p.coverToAge) || 0) >= (Number(ciDraft.age) || 0)).reduce((s2, p) => s2 + (Number(p.sumAssured) || 0), 0); return ciCover > 0 && Number(ciDraft.amount) !== ciCover ? <div className="ci-hint">CI cover in force at that age: <b className="num">{fmtFull(ciCover, cur)}</b> <button className="xc-btn" onClick={() => setCiDraft((d) => ({ ...d, amount: ciCover }))}>Use</button></div> : null; })()}
                 <div className="ci-actions">
                   <button className="ci-apply" onClick={() => { setCi({ ...ciDraft }); setStress(null); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
                   {ci && <button className="ci-clear" onClick={() => setCi(null)}>Clear</button>}
@@ -1735,7 +1847,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             { id: "charts", label: "Projection charts" },
             { id: "cashgap", label: "Cash gap analysis" },
             { id: "stress", label: "Stress test result", off: !stressActive, why: "no stress test active" },
-            { id: "protection", label: "Protection snapshot", off: protection.length === 0, why: "no policies entered" },
+            { id: "protection", label: "Protection & gap analysis", off: protection.length === 0 && !(protGap && protGap.bench.some((b) => b.inc > 0)), why: "no policies or income entered" },
             { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
             { id: "inputs", label: "Detailed inputs", },
             { id: "assumptions", label: "Assumptions" },
@@ -2002,17 +2114,33 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 )}
 
                 {/* Protection snapshot */}
-                {on("protection") && protSnap && (
+                {on("protection") && (protSnap || protGap) && (
                   <section className="report-page">
-                    <h2 className="rep-h2">Protection snapshot</h2>
-                    <table className="rep-table">
-                      <thead><tr><th>Policy</th><th>Insured</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
-                      <tbody>{protection.map((p2) => <tr key={p2.id}><td>{p2.name}</td><td>{insuredLabel(p2.insured)}</td><td className="r num">{m(Number(p2.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p2.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p2.coverToAge) >= 110 ? "Whole of life" : `Age ${p2.coverToAge}`}</td></tr>)}</tbody>
-                    </table>
-                    {Object.entries(protSnap.per).map(([k, v]) => (
+                    <h2 className="rep-h2">Protection</h2>
+                    {protection.length === 0 && <p className="rep-p rep-lede">No policies are currently recorded — the benchmark below measures the full gap.</p>}
+                    {protection.length > 0 && <table className="rep-table">
+                      <thead><tr><th>Policy</th><th>Insured</th><th>Type</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
+                      <tbody>{protection.map((p2) => <tr key={p2.id}><td>{p2.name}</td><td>{insuredLabel(p2.insured)}</td><td>{(p2.ptype || "life") === "ci" ? "Critical illness" : "Life"}</td><td className="r num">{m(Number(p2.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p2.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p2.coverToAge) >= 110 ? "Whole of life" : `Age ${p2.coverToAge}`}</td></tr>)}</tbody>
+                    </table>}
+                    {protSnap && Object.entries(protSnap.per).map(([k, v]) => (
                       <p className="rep-p" key={k}><b>{insuredLabel(k)}:</b> {v.count} polic{v.count === 1 ? "y" : "ies"} totalling {m(v.total)} of cover, costing {sym}{v.prem.toLocaleString()}/month.</p>
                     ))}
-                    {protSnap.firstDeath && (
+                    {protGap && (<>
+                      <h2 className="rep-h2" style={{ marginTop: 22 }}>Protection gap analysis</h2>
+                      <table className="rep-table">
+                        <thead><tr><th></th><th className="r">Income/yr</th><th className="r">Life {protMult.life}× benchmark</th><th className="r">In force</th><th className="r">Life gap</th><th className="r">CI {protMult.ci}× benchmark</th><th className="r">In force</th><th className="r">CI gap</th></tr></thead>
+                        <tbody>
+                          {protGap.bench.map((b) => (
+                            <tr key={b.k}><td>{b.k === "client2" ? dfn2 : dfn1}</td><td className="r num">{m(b.inc)}</td><td className="r num">{m(b.lifeNeed)}</td><td className="r num">{m(b.lifeHave)}</td><td className="r num">{b.lifeGap > 0 ? m(b.lifeGap) : "—"}</td><td className="r num">{m(b.ciNeed)}</td><td className="r num">{m(b.ciHave)}</td><td className="r num">{b.ciGap > 0 ? m(b.ciGap) : "—"}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className="rep-p rep-small">Benchmarks are a rule-of-thumb starting point ({protMult.life}× income for life cover, {protMult.ci}× for critical illness; joint income split equally). They are not a needs analysis.</p>
+                      {protGap.survivor && protGap.survivor.map((sv) => (
+                        <p className="rep-p" key={sv.k}>If {sv.k === "client2" ? dfn2 : dfn1} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor's plan {sv.funded ? "remains funded to the end of the projection" : `runs short from ${sv.firstShortYear} by ${m(sv.totalShortReal)} in total (today's money) — additional cover of ${sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)} at death would close the gap`}.</p>
+                      ))}
+                    </>)}
+                    {protSnap && protSnap.firstDeath && (
                       <p className="rep-p">{protSnap.firstDeath.payout > 0
                         ? `At the first death assumed in this plan (${insuredLabel(protSnap.firstDeath.who)}, ${protSnap.firstDeath.year}), cover totalling ${m(protSnap.firstDeath.payout)} pays out — this payment is included in the projection.`
                         : `At the first death assumed in this plan (${insuredLabel(protSnap.firstDeath.who)}, ${protSnap.firstDeath.year}), no recorded cover pays out — the policy terms end before that age.`}</p>
@@ -2214,6 +2342,22 @@ const CSS = `
 .risk-ed-head span{font-size:10.5px;color:var(--low);font-weight:600;}
 .risk-ed-name{font-size:12.5px;font-weight:600;color:var(--ink);}
 .notes-tools{margin-bottom:8px;}
+.pg-block{margin-top:16px;border-top:1px solid var(--border);padding-top:14px;display:flex;flex-direction:column;gap:8px;}
+.pg-card{border:1px solid var(--border);border-radius:11px;padding:11px 13px;display:flex;flex-direction:column;gap:4px;background:var(--bg);}
+.pg-card-name{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:7px;margin-bottom:3px;}
+.pg-inc{font-weight:400;font-size:11.5px;color:var(--low);}
+.pg-row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mid);gap:10px;}
+.pg-row .num{color:var(--ink);}
+.pg-verdict{font-weight:600;border-top:1px dashed var(--border);padding-top:4px;margin-top:2px;}
+.pg-ok span{color:var(--green);}
+.pg-gap span{color:var(--amber);}
+.pg-close{font-weight:600;}
+.pg-close .num{color:var(--green);}
+.pg-mult{display:flex;flex-direction:column;gap:5px;margin-top:2px;}
+.pg-mult-row{display:flex;align-items:center;gap:8px;}
+.pg-mult-row label{font-size:11.5px;color:var(--low);}
+.pg-surv{display:flex;flex-direction:column;gap:8px;}
+.ci-hint{font-size:12px;color:var(--mid);display:flex;align-items:center;gap:8px;margin-top:6px;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
