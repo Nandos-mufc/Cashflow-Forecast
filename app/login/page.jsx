@@ -43,7 +43,7 @@ export default function LoginPage() {
   return (
     <div className="auth-wrap">
       <div className="auth-card">
-        <h1>Runway</h1>
+        <h1>Meridian</h1>
         <p className="sub">Cashflow planning for international advisers.</p>
 
         <div className="field">
@@ -63,7 +63,7 @@ export default function LoginPage() {
         </button>
 
         <div className="auth-switch">
-          {mode === "signin" ? "New to Runway? " : "Already have an account? "}
+          {mode === "signin" ? "New to Meridian? " : "Already have an account? "}
           <button onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setInfo(""); }}>
             {mode === "signin" ? "Create an account" : "Sign in"}
           </button>
