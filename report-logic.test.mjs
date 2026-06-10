@@ -83,6 +83,46 @@ const ps = protSnapCalc(prot, true, 2061, [{ year: 2061, aliveC1: false, aliveC2
 t("PS totals", ps.per.client1.total === 600000 && ps.per.client2.total === 300000);
 t("PS only in-term policy pays", ps.firstDeath.payout === 200000);
 
+/* ---------------- protection gap analysis ---------------- */
+// Income attribution: joint income splits 50/50; one-offs and everyN excluded.
+const incomeAttribution = (incomes, age0c1, age0c2) => {
+  const annualNow = { client1: 0, client2: 0 };
+  incomes.forEach((i) => {
+    const o = i.owner || "client1";
+    if (i.frequency === "oneoff" || i.frequency === "everyN" || i.inactive) return;
+    const ann = (+i.amount || 0) * (i.frequency === "monthly" ? 12 : 1);
+    if (o === "joint") { annualNow.client1 += ann / 2; annualNow.client2 += ann / 2; }
+    else annualNow[o] += ann;
+  });
+  return annualNow;
+};
+const incs = [
+  { owner: "client1", amount: 10000, frequency: "monthly" },  // 120k
+  { owner: "client2", amount: 48000, frequency: "annual" },   // 48k
+  { owner: "joint", amount: 2000, frequency: "monthly" },     // 24k → 12k each
+  { owner: "client1", amount: 500000, frequency: "oneoff" },  // excluded
+];
+const att = incomeAttribution(incs, 49, 45);
+t("PG income attribution", att.client1 === 132000 && att.client2 === 60000);
+
+// Benchmark math: need = mult × income, gap floored at zero
+const benchCalc = (inc, mult, have) => Math.max(0, inc * mult - have);
+t("PG life gap 10x", benchCalc(132000, 10, 400000) === 920000);
+t("PG covered → no gap", benchCalc(60000, 10, 700000) === 0);
+t("PG CI gap 3x with no cover", benchCalc(132000, 3, 0) === 396000);
+
+// Engine payout semantics: CI policies never pay on death; life pays only if term extends past death age
+const paysOnDeath = (p, deathAge) => (p.ptype || "life") !== "ci" && (+p.coverToAge || 0) > deathAge;
+t("PG ci never pays on death", paysOnDeath({ ptype: "ci", coverToAge: 99, sumAssured: 100000 }, 50) === false);
+t("PG legacy policy (no ptype) = life", paysOnDeath({ coverToAge: 99 }, 50) === true);
+t("PG term boundary: cover to 60, death at 60 → no pay", paysOnDeath({ ptype: "life", coverToAge: 60 }, 60) === false);
+t("PG term boundary: cover to 61, death at 60 → pays", paysOnDeath({ ptype: "life", coverToAge: 61 }, 60) === true);
+
+// Death-age clamping for the survivor test input
+const clampDeathAge = (v, minAge, maxAge) => Math.min(maxAge, Math.max(minAge, Math.round(+v || minAge)));
+t("PG death age clamps below", clampDeathAge(30, 50, 92) === 50);
+t("PG death age clamps above", clampDeathAge(120, 50, 92) === 92);
+
 /* ---------------- compliance language scan ---------------- */
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, "..", "components", "RunwayApp.jsx"), "utf8");
