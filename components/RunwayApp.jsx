@@ -694,7 +694,7 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
 /* ================================================================== */
 /*  APP                                                               */
 /* ================================================================== */
-export default function RunwayApp({ initialData = null, onChange = null }) {
+export default function RunwayApp({ initialData = null, onChange = null, scenarios = null, activeScenarioId = null, compareScenarioId = null, compareName = null, compareData = null, onScenarioAction = null }) {
   const seed = initialData || SEED;
   const [theme, setTheme] = useState("light");
   const [present, setPresent] = useState(false);
@@ -804,6 +804,25 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const hasProperty = useMemo(() => assets.some((a) => a.type === "property"), [assets]);
 
   const inflDec = (Number(effAssumptions.inflation) || 0) / 100;
+
+  // Comparison scenario — projected with its own assumptions, deflated by its own inflation,
+  // then aligned to the active plan's chart by calendar year.
+  const compareMap = useMemo(() => {
+    if (!compareData || !compareData.profile) return null;
+    try {
+      const crows = projectCashflow({
+        profile: compareData.profile, assumptions: compareData.assumptions || {},
+        assets: compareData.assets || [], incomes: compareData.incomes || [],
+        expenses: compareData.expenses || [], liabilities: compareData.liabilities || [],
+        protection: compareData.protection || [],
+      });
+      const cInfl = (Number((compareData.assumptions || {}).inflation) || 0) / 100;
+      const mp = new Map();
+      crows.forEach((r) => { const f = showReal ? Math.pow(1 + cInfl, r.y) : 1; mp.set(r.year, (r.total - (r.debt || 0)) / f); });
+      return mp;
+    } catch { return null; }
+  }, [compareData, showReal]);
+
   const data = useMemo(() => rows.map((r, idx) => {
     const f = showReal ? Math.pow(1 + inflDec, r.y) : 1;
     const dz = (v) => v / f;
@@ -811,13 +830,14 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     const flow = sr || r; // money-in-vs-out reflects the active scenario (e.g. CI salary drop, crash depletion)
     const o = { year: r.year, y: r.y, c1Age: r.c1Age, c2Age: r.c2Age, aliveC1: r.aliveC1, aliveC2: r.aliveC2, total: dz(r.total), property: dz(r.property), investable: dz(r.total - r.property), debt: dz(r.debt || 0), netWorth: dz(r.total - (r.debt || 0)), income: dz(flow.income), expenditure: dz(flow.expenditure), taxPaid: dz(flow.taxPaid || 0), contrib: dz(flow.contrib || 0), outgoings: dz(flow.expenditure + (flow.contrib || 0)), expEssential: dz(flow.expEssential || 0), expDiscretionary: dz(flow.expDiscretionary || 0), premiums: dz(flow.premiums || 0), liabRepay: dz(flow.liabRepay || 0) };
     if (sr) o.stressed = dz(sr.total - (sr.debt || 0));
+    if (compareMap && compareMap.has(r.year)) o.cmp = compareMap.get(r.year);
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
     const gap = Math.max(0, (flow.expenditure + (flow.contrib || 0)) - flow.income);
     o.coveredBySavings = dz(Math.max(0, gap - flow.shortfall));
     o.uncovered = dz(flow.shortfall);
     return o;
-  }), [rows, showReal, inflDec, assets, incomes, stressRows]);
+  }), [rows, showReal, inflDec, assets, incomes, stressRows, compareMap]);
 
   const stressImpact = useMemo(() => {
     if (!stressRows) return null;
@@ -1259,8 +1279,9 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     { id: "liabilities", label: "Liabilities", Icon: CreditCard },
     { id: "protection", label: "Protection", Icon: Shield },
     { id: "notes", label: "Adviser notes", Icon: StickyNote },
+    { id: "scenarios", label: "Scenarios", Icon: Layers },
   ];
-  const NAV_SOON = [{ id: "scenarios", label: "Scenarios", Icon: Layers }, { id: "report", label: "Report", Icon: FileText }];
+  const NAV_SOON = [];
 
   const clientCard = (which, client, fb) => {
     const age = which === "client1" ? ectx.age0c1 : ectx.age0c2;
@@ -1303,7 +1324,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
           <nav className="rail">
             <div className="rail-group">{NAV.map((n) => <button key={n.id} className={`rail-item ${section === n.id ? "active" : ""}`} onClick={() => setSection(n.id)}><n.Icon size={17} /><span className="rail-label">{n.label}</span></button>)}</div>
             <div className="rail-divider" />
-            <div className="rail-group">{NAV_SOON.map((n) => <button key={n.id} className="rail-item soon" disabled><n.Icon size={17} /><span className="rail-label">{n.label}</span><span className="soon-pill">Soon</span></button>)}</div>
+            {NAV_SOON.length > 0 && <div className="rail-group">{NAV_SOON.map((n) => <button key={n.id} className="rail-item soon" disabled><n.Icon size={17} /><span className="rail-label">{n.label}</span><span className="soon-pill">Soon</span></button>)}</div>}
           </nav>
         )}
         {!present && <div className="tabbar">{NAV.map((n) => <button key={n.id} className={`tab ${section === n.id ? "active" : ""}`} onClick={() => setSection(n.id)}><n.Icon size={15} /> {n.label}</button>)}</div>}
@@ -1603,6 +1624,25 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                 <p className="ed-hint">Internal to you — saved with the plan but never shown in client view or the report. Use it for suitability rationale, review reminders, and anything you'd otherwise lose in a notebook.</p>
               </div>
             )}
+            {section === "scenarios" && (
+              <div className="ed-body">
+                <div className="ed-head"><h2 className="ed-title">Scenarios</h2>{onScenarioAction && <button className="add-btn" onClick={() => onScenarioAction({ type: "create", name: null, data: { profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes } })}><Plus size={15} /> New from current</button>}</div>
+                {!onScenarioAction && <p className="empty-note">Scenario management is available in the full app with a signed-in adviser account.</p>}
+                {onScenarioAction && (scenarios || []).map((sc) => {
+                  const isActive = sc.id === activeScenarioId;
+                  const isCompare = sc.id === compareScenarioId;
+                  return (
+                    <div className={`scen-row ${isActive ? "on" : ""}`} key={sc.id}>
+                      <input className="scen-name" key={`${sc.id}-${sc.name}`} defaultValue={sc.name} onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== sc.name) onScenarioAction({ type: "rename", id: sc.id, name: v }); }} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
+                      {isActive ? <span className="scen-chip scen-chip-on">Editing</span> : <button className="scen-btn" onClick={() => onScenarioAction({ type: "switch", id: sc.id })}>Open</button>}
+                      {!isActive && <button className={`scen-btn ${isCompare ? "scen-btn-cmp" : ""}`} onClick={() => onScenarioAction({ type: "compare", id: isCompare ? null : sc.id })}>{isCompare ? "✓ Comparing" : "Compare"}</button>}
+                      {!isActive && (scenarios || []).length > 1 && <button className="scen-del" onClick={() => onScenarioAction({ type: "delete", id: sc.id })}><Trash2 size={13} /></button>}
+                    </div>
+                  );
+                })}
+                {onScenarioAction && <p className="ed-hint">"New from current" copies this plan as a starting point — e.g. duplicate the current situation, then build the proposed solution in the copy. "Compare" overlays the other scenario's net worth on the chart as a dashed line so the client sees both paths at once.</p>}
+              </div>
+            )}
           </section>
         )}
 
@@ -1618,7 +1658,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
 
           <div className="chart-card">
             <div className="chart-head">
-              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}</div></div>
+              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
               {!present && (
                 <div className="head-toggles">
                   <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
@@ -1684,6 +1724,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   {hasProperty && <Line type="monotone" dataKey="investable" stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
                   {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={2} strokeDasharray="6 3" dot={false} isAnimationActive={false} />}
+                  {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(262 62% 58%)" strokeWidth={2} strokeDasharray="4 4" dot={false} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
               </ResponsiveContainer>
@@ -2370,6 +2411,20 @@ const CSS = `
 .pg-chart-btn:hover{border-color:var(--accent);color:var(--accent);}
 .pg-chart-btn-on{border-color:var(--red);color:var(--red);}
 .pg-chart-btn-on:hover{border-color:var(--red);color:var(--red);}
+.scen-row{display:flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--bg);}
+.scen-row.on{border-color:var(--accent);}
+.scen-name{flex:1;min-width:0;background:none;border:none;outline:none;font:inherit;font-size:13px;font-weight:600;color:var(--ink);}
+.scen-chip{font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:3px 7px;border-radius:6px;}
+.scen-chip-on{background:var(--accent-soft,#eef3fb);color:var(--accent);}
+.scen-btn{background:none;border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-size:11.5px;font-weight:600;color:var(--low);cursor:pointer;font-family:inherit;white-space:nowrap;}
+.scen-btn:hover{color:var(--ink);border-color:var(--border-strong);}
+.scen-btn-cmp{border-color:hsl(262 62% 58%);color:hsl(262 62% 58%);}
+.scen-del{background:none;border:none;color:var(--low);cursor:pointer;padding:3px;display:flex;}
+.scen-del:hover{color:var(--red);}
+.chart-cmp{margin-top:5px;font-size:11.5px;color:var(--mid);display:flex;align-items:center;gap:6px;}
+.chart-cmp i{width:14px;height:0;border-top:2px dashed hsl(262 62% 58%);display:inline-block;}
+.chart-cmp b{color:var(--ink);}
+.chart-cmp-x{background:none;border:1px solid var(--border);border-radius:5px;color:var(--low);cursor:pointer;font-size:11px;line-height:1;padding:2px 5px;margin-left:2px;}
 .anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
