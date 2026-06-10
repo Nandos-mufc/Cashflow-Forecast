@@ -36,6 +36,7 @@ import {
   Globe,
   CreditCard,
   Shield,
+  StickyNote,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -51,6 +52,15 @@ const ASSET_TYPES = [
   { value: "pension", label: "Pension" },
   { value: "property", label: "Property" },
 ];
+/* Risk profile templates — growth rate (% p.a., before inflation) per asset type.
+   Picking a profile applies these rates to the assets owned by that person. */
+const RISK_PROFILES = [
+  { id: "cautious",   label: "Cautious",   rates: { cash: 1.0, investment: 3.0, pension: 3.0, property: 2.0 } },
+  { id: "balanced",   label: "Balanced",   rates: { cash: 1.5, investment: 5.0, pension: 5.0, property: 3.0 } },
+  { id: "growth",     label: "Growth",     rates: { cash: 1.5, investment: 6.5, pension: 6.5, property: 3.5 } },
+  { id: "aggressive", label: "Aggressive", rates: { cash: 2.0, investment: 8.0, pension: 8.0, property: 4.0 } },
+];
+const riskProfileById = (id) => RISK_PROFILES.find((p) => p.id === id) || null;
 const LIAB_TYPES = [
   { value: "mortgage", label: "Residential mortgage" },
   { value: "btl", label: "BTL mortgage" },
@@ -383,7 +393,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
         const amt = flowForYear(c, y, ctx, inflDec) * frac;
         if (amt > 0) {
           bal[a.id] += amt;
-          if (c.source !== "employer") contribPersonal += amt;
+          if (c.source !== "employer" || a.type !== "pension") contribPersonal += amt;
         }
       }
     });
@@ -593,14 +603,16 @@ const Text = ({ value, onChange, placeholder, className = "" }) => (
 function Anchor({ value, onChange, owner, ectx }) {
   const v = value || { mode: "now" };
   const age = resolveAge(v, owner, ectx);
+  const age0 = owner === "client2" ? ectx.age0c2 : ectx.age0c1;
+  const yr = new Date().getFullYear() + ((Number(age) || age0) - age0);
   return (
     <div className="anchor">
       <select className="pick" value={v.mode} onChange={(e) => onChange({ ...v, mode: e.target.value, age: v.age || ectx.retC1 })}>
         {ANCHORS.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
       </select>
       {v.mode === "age"
-        ? <NumberInput className="anchor-age" value={v.age || ectx.retC1} onCommit={(n) => onChange({ ...v, age: n })} />
-        : <span className="anchor-res num">{age}</span>}
+        ? <><NumberInput className="anchor-age" value={v.age || ectx.retC1} onCommit={(n) => onChange({ ...v, age: n })} /><span className="anchor-yr num">({yr})</span></>
+        : <span className="anchor-res num">{age}{v.mode !== "now" ? <span className="anchor-yr"> ({yr})</span> : null}</span>}
     </div>
   );
 }
@@ -610,6 +622,15 @@ const Toggle = ({ on, onClick, sm }) => (
 const Seg = ({ value, onChange, options }) => (
   <div className="seg2">{options.map((o) => <button key={o.value} className={value === o.value ? "on" : ""} onClick={() => onChange(o.value)}>{o.label}</button>)}</div>
 );
+const ExpandCtl = ({ items, open, onExpand, onCollapse }) => {
+  if (!items || items.length < 2) return null;
+  const allOpen = items.every((x) => open.has(x.id));
+  return (
+    <button className="xc-btn" onClick={() => (allOpen ? onCollapse(items) : onExpand(items))}>
+      {allOpen ? "Collapse all" : "Expand all"}
+    </button>
+  );
+};
 
 /* ================================================================== */
 /*  STREAM ROW (income / expense)                                     */
@@ -693,12 +714,13 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const [expenses, setExpenses] = useState(seed.expenses);
   const [liabilities, setLiabilities] = useState(seed.liabilities || []);
   const [protection, setProtection] = useState(seed.protection || []);
+  const [adviserNotes, setAdviserNotes] = useState(seed.adviserNotes || "");
 
   // Report the full plan upward so the host can persist it (autosave).
   useEffect(() => {
     if (!onChange) return;
-    onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations });
-  }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations]); // eslint-disable-line react-hooks/exhaustive-deps
+    onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes });
+  }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches dark/light.
   useEffect(() => {
@@ -806,7 +828,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   }, [ectx, rows, couple, baseYear]);
 
   const hasDebt = useMemo(() => liabilities.some((L) => (Number(L.balance) || 0) > 0), [liabilities]);
-  const hasContrib = useMemo(() => assets.some((a) => a.contribution && a.contribution.enabled && a.contribution.source !== "employer" && (Number(a.contribution.amount) || 0) > 0), [assets]);
+  const hasContrib = useMemo(() => assets.some((a) => a.contribution && a.contribution.enabled && (a.contribution.source !== "employer" || a.type !== "pension") && (Number(a.contribution.amount) || 0) > 0), [assets]);
   const kpis = useMemo(() => {
     const grossNow = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
     const debtNow = liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0);
@@ -942,6 +964,31 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
   const addBand = (pid) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: [...p.bands, { upTo: "", rate: 0 }] }); };
   const rmBand = (pid, idx) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: p.bands.filter((_, i) => i !== idx) }); };
   const toggleOpen = (id) => setOpen((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const expandAll = (items) => setOpen((s) => { const n = new Set(s); items.forEach((x) => n.add(x.id)); return n; });
+  const collapseAll = (items) => setOpen((s) => { const n = new Set(s); items.forEach((x) => n.delete(x.id)); return n; });
+
+  // ---- Risk profiles (per client) -------------------------------------------------------------
+  // Selecting a profile applies its per-type growth rates to the assets that person owns.
+  // riskProfiles persists the selection; the badge shows "edited" if any rate has since been
+  // changed by hand, so the adviser always knows whether the label still reflects reality.
+  const riskProfiles = assumptions.riskProfiles || {};
+  const applyRiskProfile = (ownerKey, profileId) => {
+    const p = riskProfileById(profileId);
+    setAssumptions((a) => ({ ...a, riskProfiles: { ...(a.riskProfiles || {}), [ownerKey]: profileId || null } }));
+    if (!p) return; // "custom" / cleared — keep current rates
+    setAssets((prev) => prev.map((as) => ((as.owner || "client1") === ownerKey && p.rates[as.type] != null ? { ...as, growthRate: p.rates[as.type] } : as)));
+  };
+  const riskDrift = useMemo(() => {
+    const drift = {};
+    ["client1", "client2", "joint"].forEach((k) => {
+      const p = riskProfileById(riskProfiles[k]);
+      if (!p) return;
+      drift[k] = assets.some((as) => (as.owner || "client1") === k && p.rates[as.type] != null && Number(as.growthRate) !== p.rates[as.type]);
+    });
+    return drift;
+  }, [assets, riskProfiles]);
+  const riskOwnerKeys = couple ? ["client1", "client2", "joint"] : ["client1"];
+  const riskOwnerLabel = (k) => (k === "joint" ? "Joint assets" : (profile[k].name || (k === "client1" ? "Client 1" : "Client 2")));
   const addOpen = (setter, rec) => { setter((p) => [...p, rec]); setOpen((s) => new Set(s).add(rec.id)); };
   const addAsset = () => addOpen(setAssets, { id: uid(), name: "New asset", type: "investment", value: 0, growthRate: 5, drawdown: true, owner: couple ? "joint" : "client1", contribution: contribDefault() });
   const addInc = () => addOpen(setIncomes, { id: uid(), name: "New income", amount: 0, frequency: "annual", escalation: "none", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, owner: "client1", onDeath: deathDefault() });
@@ -1018,6 +1065,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
     { id: "expenditure", label: "Expenditure", Icon: Receipt },
     { id: "liabilities", label: "Liabilities", Icon: CreditCard },
     { id: "protection", label: "Protection", Icon: Shield },
+    { id: "notes", label: "Adviser notes", Icon: StickyNote },
   ];
   const NAV_SOON = [{ id: "scenarios", label: "Scenarios", Icon: Layers }, { id: "report", label: "Report", Icon: FileText }];
 
@@ -1090,6 +1138,16 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
               <div className="ed-body">
                 <h2 className="ed-title">Assumptions</h2>
                 <div className="field"><label>Inflation rate</label><Mini value={assumptions.inflation} step={0.1} suffix="%" onChange={(v) => setAssumptions((a) => ({ ...a, inflation: v }))} /><span className="field-note">Drives every "with inflation" line and the today's-money view.</span></div>
+                <div className="risk-block">
+                  <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
+                  {riskOwnerKeys.map((k) => (
+                    <div className="rec-field risk-row" key={k}>
+                      <label>{riskOwnerLabel(k)}{riskDrift[k] && <em className="risk-edited"> · edited</em>}</label>
+                      <Pick value={riskProfiles[k] || ""} onChange={(v) => applyRiskProfile(k, v)} options={[{ value: "", label: "Custom / not set" }, ...RISK_PROFILES.map((p) => ({ value: p.id, label: p.label }))]} />
+                    </div>
+                  ))}
+                  <span className="field-note">{couple ? "Different profiles per client let you show what-if comparisons — e.g. one Cautious, one Growth. " : ""}Rates applied per asset type: {RISK_PROFILES.map((p) => `${p.label} ${p.rates.investment}%`).join(" · ")} (investments/pensions; cash and property scaled accordingly).</span>
+                </div>
                 <p className="ed-hint">Per-asset growth is set on each asset. Mortality is set per client. Charges &amp; fees module is next once we map your fee structure.</p>
               </div>
             )}
@@ -1138,7 +1196,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             )}
             {section === "assets" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div>
+                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
                 {assets.map((a) => {
                   const expanded = open.has(a.id);
                   const realRet = ((Number(a.growthRate) || 0) - (Number(assumptions.inflation) || 0)).toFixed(1);
@@ -1179,7 +1237,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                                 <div className="rec-field"><label>Starts</label><Anchor value={a.contribution.start} owner={a.owner || "client1"} ectx={ectx} onChange={(v) => upContrib(a.id, { start: v })} /></div>
                                 {a.contribution.frequency !== "oneoff" && <div className="rec-field"><label>Ends</label><Anchor value={a.contribution.end} owner={a.owner || "client1"} ectx={ectx} onChange={(v) => upContrib(a.id, { end: v })} /></div>}
                               </div>
-                              <div className="rec-field"><label>Source <InfoTip text="Personal contributions are paid from cashflow, so they reduce the surplus available each year. Employer contributions are added straight to the pot and don't affect the client's cashflow." /></label><Seg value={a.contribution.source} onChange={(v) => upContrib(a.id, { source: v })} options={[{ value: "personal", label: "Personal" }, { value: "employer", label: "Employer" }]} /><span className="inl-note">{a.contribution.source === "employer" ? "added to pot, doesn't reduce cashflow" : "funded from surplus"}</span></div>
+                              {a.type === "pension" && <div className="rec-field"><label>Source <InfoTip text="Personal contributions are paid from cashflow, so they reduce the surplus available each year. Employer contributions are added straight to the pot and don't affect the client's cashflow." /></label><Seg value={a.contribution.source} onChange={(v) => upContrib(a.id, { source: v })} options={[{ value: "personal", label: "Personal" }, { value: "employer", label: "Employer" }]} /><span className="inl-note">{a.contribution.source === "employer" ? "added to pot, doesn't reduce cashflow" : "funded from surplus"}</span></div>}
                             </>)}
                           </div>
                           {couple && <span className="inl-note">Passes to the survivor on death.</span>}
@@ -1194,21 +1252,21 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             )}
             {section === "income" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Income</h2><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div>
+                <div className="ed-head"><h2 className="ed-title">Income</h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
                 {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => toggleOpen(i.id)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
                 <p className="ed-hint">End salary at "Retirement" and it tracks each person's retirement age. {couple ? "Set what happens to each income on that person's death." : ""}</p>
               </div>
             )}
             {section === "expenditure" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Expenditure</h2><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div>
+                <div className="ed-head"><h2 className="ed-title">Expenditure</h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
                 {expenses.map((e) => <StreamRow key={e.id} item={e} sym={sym} kind="expense" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(e.id)} onToggle={() => toggleOpen(e.id)} onChange={(p) => upExp(e.id, p)} onRemove={() => rmExp(e.id)} />)}
                 <p className="ed-hint">One-off and "every N years" cover ad-hoc costs. {couple ? "Joint costs step down to the survivor rate after a death; personal costs cease." : ""}</p>
               </div>
             )}
             {section === "liabilities" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Liabilities</h2><button className="add-btn" onClick={addLiab}><Plus size={15} /> Add</button></div>
+                <div className="ed-head"><h2 className="ed-title">Liabilities</h2><div className="ed-head-tools"><ExpandCtl items={liabilities} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addLiab}><Plus size={15} /> Add</button></div></div>
                 {liabilities.length === 0 && <p className="empty-note">No debts yet. Add a mortgage, BTL loan, or other borrowing — it reduces net worth and its repayments count as spending.</p>}
                 {liabilities.map((L) => {
                   const expanded = open.has(L.id);
@@ -1246,7 +1304,7 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
             )}
             {section === "protection" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Protection</h2><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div>
+                <div className="ed-head"><h2 className="ed-title">Protection</h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
                 {protection.length === 0 && <p className="empty-note">No policies yet. Add life cover to model what a lump sum on death would mean for the survivor's plan.</p>}
                 {protection.map((p) => {
                   const expanded = open.has(p.id);
@@ -1277,6 +1335,18 @@ export default function RunwayApp({ initialData = null, onChange = null }) {
                   );
                 })}
                 <p className="ed-hint">Premiums are treated as spending while cover is in force. On the insured's death within the term, the sum assured is paid into the household pot{couple ? " — you'll see the survivor's net worth step up" : ""}. Critical-illness claim modelling is coming as a stress-test scenario.</p>
+              </div>
+            )}
+            {section === "notes" && (
+              <div className="ed-body">
+                <h2 className="ed-title">Adviser notes</h2>
+                <textarea
+                  className="notes-area"
+                  value={adviserNotes}
+                  onChange={(e) => setAdviserNotes(e.target.value)}
+                  placeholder={"Meeting notes, rationale, follow-ups…\n\ne.g. 12 Jun — agreed Balanced for Sara, review BTL sale at next annual review. Client wants school fees modelled from 2028."}
+                />
+                <p className="ed-hint">Internal to you — saved with the plan but never shown in client view or the report. Use it for suitability rationale, review reminders, and anything you'd otherwise lose in a notebook.</p>
               </div>
             )}
           </section>
@@ -1756,6 +1826,15 @@ const CSS = `
 .editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;}
 .ed-body{padding:18px 16px;display:flex;flex-direction:column;gap:13px;}
 .ed-head{display:flex;align-items:center;justify-content:space-between;}
+.ed-head-tools{display:flex;align-items:center;gap:8px;}
+.xc-btn{background:none;border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-size:11.5px;font-weight:600;color:var(--low);cursor:pointer;font-family:inherit;}
+.xc-btn:hover{color:var(--ink);border-color:var(--border-strong);}
+.notes-area{width:100%;min-height:260px;resize:vertical;background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:12px 14px;font:inherit;font-size:13.5px;line-height:1.55;color:var(--ink);outline:none;box-sizing:border-box;}
+.notes-area:focus{border-color:var(--border-strong);}
+.risk-block{display:flex;flex-direction:column;gap:8px;margin-top:14px;}
+.risk-row{display:flex;flex-direction:column;gap:4px;}
+.risk-edited{font-style:normal;color:var(--amber);font-weight:600;}
+.anchor-yr{font-size:11.5px;color:var(--low);white-space:nowrap;}
 .ed-title{font-family:'Fraunces',serif;font-size:18px;font-weight:600;margin:0;}
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
 .add-btn.wide{width:100%;justify-content:center;padding:9px;margin-top:4px;}
