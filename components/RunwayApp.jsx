@@ -109,6 +109,7 @@ const contribDefault = (enabled = false, amount = 0) => ({
   enabled, amount, frequency: "annual", source: "personal", escalation: "inflation", customEsc: 0,
   start: { mode: "now" }, end: { mode: "retirement" },
 });
+const withdrawalDefault = () => ({ enabled: false, amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, start: { mode: "retirement" }, end: { mode: "end" } });
 const deathDefault = () => ({ mode: "cease", pct: 50 });
 
 // Tax is OFF by default (international-first). When off, the engine behaves exactly as if this block didn't exist.
@@ -311,8 +312,11 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
   const liab = {};
   liabilities.forEach((L) => (liab[L.id] = Math.max(0, Number(L.balance) || 0)));
 
-  const surplusDest = () =>
-    (assets.find((a) => a.type === "investment") || assets.find((a) => a.type === "cash") || assets[0] || {}).id;
+  const surplusDest = () => {
+    const chosen = assumptions.surplusDestId && assets.find((a) => a.id === assumptions.surplusDestId && (a.type === "cash" || a.type === "investment"));
+    if (chosen) return chosen.id;
+    return (assets.find((a) => a.type === "cash") || assets.find((a) => a.type === "investment") || assets[0] || {}).id;
+  };
 
   const rows = [];
   let prevAliveC1 = true, prevAliveC2 = true;
@@ -430,8 +434,30 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       }
     });
 
+    // Planned withdrawals — an explicit drawdown set on an asset. Paid out of the pot into the
+    // client's hands and surfaced as income (a "Drawdown" band in the MIMO), NOT an expense, so it
+    // can never be double-counted against the expenditure list. Capped at the available balance.
+    // Pensions can only be drawn from the owner's retirement age (or if inherited by a survivor).
+    let plannedDraw = 0;
+    assets.forEach((a) => {
+      const w = a.withdrawal;
+      if (!w || !w.enabled) return;
+      if (a.type === "pension") {
+        const o = a.owner || "client1";
+        const oAge = o === "client2" ? c2Age : c1Age;
+        const oRet = o === "client2" ? ctx.retC2 : ctx.retC1;
+        const inherited = couple && !ownerAlive(o);
+        if (!(oAge >= oRet || inherited)) return;
+      }
+      const want = flowForYear(w, y, ctx, inflDec) * frac;
+      if (want <= 0) return;
+      const taken = Math.min(bal[a.id], want);
+      bal[a.id] -= taken;
+      plannedDraw += taken;
+    });
+
     const net = income - expenditure;
-    const freeAfter = net - contribPersonal;
+    const freeAfter = net + plannedDraw - contribPersonal;
 
     const drawList = () => {
       const out = [];
@@ -510,7 +536,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     }
 
     const status = shortfall > 0 ? "red" : net >= 0 ? "green" : "amber";
-    rows.push({ y, year: baseYear + y, c1Age, c2Age, aliveC1, aliveC2, firstDeath, total, property, debt, income, expenditure, expEssential, expDiscretionary, liabRepay, premiums, contrib: contribPersonal, net, status, shortfall, taxPaid, incomeBy, ...pots });
+    rows.push({ y, year: baseYear + y, c1Age, c2Age, aliveC1, aliveC2, firstDeath, total, property, debt, income, plannedDraw, expenditure, expEssential, expDiscretionary, liabRepay, premiums, contrib: contribPersonal, net, status, shortfall, taxPaid, incomeBy, ...pots });
 
     prevAliveC1 = aliveC1;
     prevAliveC2 = aliveC2;
@@ -545,6 +571,7 @@ const buildColors = (assets) => {
   return map;
 };
 const INCOME_LEGEND = "hsl(150 48% 42%)";
+const DRAWDOWN_COLOR = "hsl(185 64% 40%)";
 const buildIncomeColors = (incomes) => {
   const map = {};
   incomes.forEach((i, idx) => { map[i.id] = `hsl(${150 + idx * 18} ${50 - (idx % 2) * 8}% ${Math.max(34, 46 - Math.floor(idx / 4) * 6)}%)`; });
@@ -860,7 +887,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (compareMap && compareMap.has(r.year)) o.cmp = compareMap.get(r.year);
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
-    const gap = Math.max(0, (flow.expenditure + (flow.contrib || 0)) - flow.income);
+    o.plannedDraw = dz(flow.plannedDraw || 0);
+    const gap = Math.max(0, (flow.expenditure + (flow.contrib || 0)) - flow.income - (flow.plannedDraw || 0));
     o.coveredBySavings = dz(Math.max(0, gap - flow.shortfall));
     o.uncovered = dz(flow.shortfall);
     return o;
@@ -888,6 +916,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const hasDebt = useMemo(() => liabilities.some((L) => (Number(L.balance) || 0) > 0), [liabilities]);
 
   const hasContrib = useMemo(() => assets.some((a) => a.contribution && a.contribution.enabled && (a.contribution.source !== "employer" || a.type !== "pension") && (Number(a.contribution.amount) || 0) > 0), [assets]);
+  const hasPlannedDraw = useMemo(() => assets.some((a) => a.withdrawal && a.withdrawal.enabled && (Number(a.withdrawal.amount) || 0) > 0), [assets]);
   const kpis = useMemo(() => {
     const grossNow = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
     const debtNow = liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0);
@@ -1197,6 +1226,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const upPol = patch(setProtection), rmPol = rmFn(setProtection);
   const addPol = () => addOpen(setProtection, { id: uid(), name: "New policy", insured: "client1", sumAssured: 250000, premium: 50, coverToAge: 90 }, protection);
   const upContrib = (id, p) => setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, contribution: { ...a.contribution, ...p } } : a)));
+  const upWithdrawal = (id, p) => setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, withdrawal: { ...(a.withdrawal || withdrawalDefault()), ...p } } : a)));
   const upClient = (which, p) => setProfile((prev) => ({ ...prev, [which]: { ...prev[which], ...p } }));
   const addAnnotation = () => setAnnotations((a) => [...a, { id: uid(), year: baseYear + 5, text: "" }]);
   const upAnnotation = (id, p) => setAnnotations((a) => a.map((x) => (x.id === id ? { ...x, ...p } : x)));
@@ -1312,6 +1342,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         {incomes.map((i) => (d[iKey(i.id)] > 0 ? <div className="tip-row" key={i.id}><span className="tip-name"><i style={{ background: incColors[i.id] }} /> {i.name}</span><span className="num">{fmtFull(d[iKey(i.id)], cur)}</span></div> : null))}
         {yearPayouts.map((e, i) => <div key={`p${i}`} className="tip-row" style={{ color: t.green }}><span className="tip-name" style={{ color: t.green }}>↑ {e.label}</span><span className="num">to savings</span></div>)}
         <div className="tip-row tip-sub"><span>Total income</span><span className="num">{fmtFull(d.income, cur)}</span></div>
+        {d.plannedDraw > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: DRAWDOWN_COLOR }} /> Planned drawdown</span><span className="num">{fmtFull(d.plannedDraw, cur)}</span></div>}
         {d.coveredBySavings > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.amber }} /> Drawn from savings</span><span className="num">{fmtFull(d.coveredBySavings, cur)}</span></div>}
         {d.uncovered > 0 && <div className="tip-row"><span className="tip-name"><i style={{ background: t.red }} /> Unfunded shortfall</span><span className="num">{fmtFull(d.uncovered, cur)}</span></div>}
         <div className="tip-rule" />
@@ -1414,7 +1445,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="ed-body">
                 <h2 className="ed-title">Assumptions</h2>
                 <div className="field"><label>Inflation rate</label><Mini value={assumptions.inflation} step={0.1} suffix="%" onChange={(v) => setAssumptions((a) => ({ ...a, inflation: v }))} /><span className="field-note">Drives every "with inflation" line and the today's-money view.</span></div>
-                <div className="field"><label>Surplus income</label><Seg value={assumptions.autoInvestSurplus === false ? "spend" : "invest"} onChange={(v) => setAssumptions((a) => ({ ...a, autoInvestSurplus: v === "invest" }))} options={[{ value: "invest", label: "Reinvested" }, { value: "spend", label: "Spent / external" }]} /><span className="field-note">{assumptions.autoInvestSurplus === false ? "Income above spending leaves the plan — pots grow only by their own returns and contributions. Best for illustrating a single investment." : "Income above spending is swept into the first cash or investment pot each year. Best for a full household plan."}</span></div>
+                <div className="field"><label>Surplus income</label><Seg value={assumptions.autoInvestSurplus === false ? "spend" : "invest"} onChange={(v) => setAssumptions((a) => ({ ...a, autoInvestSurplus: v === "invest" }))} options={[{ value: "invest", label: "Reinvested" }, { value: "spend", label: "Spent / external" }]} /><span className="field-note">{assumptions.autoInvestSurplus === false ? "Income above spending leaves the plan — pots grow only by their own returns and contributions. Best for illustrating a single investment." : "Income above spending is added to the account chosen below each year. Best for a full household plan."}</span></div>
+                {assumptions.autoInvestSurplus !== false && (() => { const cashInv = assets.filter((a) => a.type === "cash" || a.type === "investment"); return cashInv.length > 0 ? (
+                  <div className="field"><label>Surplus goes to</label><Pick value={assumptions.surplusDestId && cashInv.some((a) => a.id === assumptions.surplusDestId) ? assumptions.surplusDestId : ""} onChange={(v) => setAssumptions((a) => ({ ...a, surplusDestId: v || null }))} options={[{ value: "", label: "Auto (first cash, else investment)" }, ...cashInv.map((a) => ({ value: a.id, label: a.name || "Untitled" }))]} /><span className="field-note">Which account receives reinvested surplus each year — and you'll see that pot grow.</span></div>
+                ) : null; })()}
                 <div className="risk-block">
                   <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
                   {riskOwnerKeys.map((k) => (
@@ -1538,6 +1572,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                               <div className="rec-field"><label>Funded from <InfoTip text="Cashflow: the contribution is paid out of this plan's income, so it reduces the surplus each year — and if there isn't enough income, it's drawn from savings. Standalone: the money is assumed to come from outside the modelled cashflow, so the pot simply grows by the contribution with no withdrawal. Use Standalone to illustrate an investment's growth in isolation, without entering income and expenditure." /></label><Seg value={a.contribution.funding || "cashflow"} onChange={(v) => upContrib(a.id, { funding: v })} options={[{ value: "cashflow", label: "Cashflow" }, { value: "external", label: "Standalone" }]} /><span className="inl-note">{(a.contribution.funding || "cashflow") === "external" ? "illustrative — grows the pot, ignores cashflow" : "reduces this year's surplus"}</span></div>
                             </>)}
                           </div>
+                          {a.type !== "property" && (
+                            <div className="contrib">
+                              <button className="contrib-head" onClick={() => upAsset(a.id, { withdrawal: { ...(a.withdrawal || withdrawalDefault()), enabled: !(a.withdrawal && a.withdrawal.enabled) } })}><span className={`toggle sm ${a.withdrawal && a.withdrawal.enabled ? "on" : ""}`} aria-hidden="true"><span /></span> Planned withdrawal</button>
+                              {a.withdrawal && a.withdrawal.enabled && (<>
+                                <div className="rec-grid">
+                                  <div className="rec-field"><label>Amount</label><Money value={a.withdrawal.amount} symbol={sym} onChange={(v) => upWithdrawal(a.id, { amount: v })} /></div>
+                                  <div className="rec-field"><label>Frequency</label><Pick value={a.withdrawal.frequency} onChange={(v) => upWithdrawal(a.id, { frequency: v })} options={CONTRIB_FREQS} /></div>
+                                </div>
+                                <div className="rec-grid">
+                                  <div className="rec-field"><label>Starts</label><Anchor value={a.withdrawal.start} owner={a.owner || "client1"} ectx={ectx} onChange={(v) => upWithdrawal(a.id, { start: v })} /></div>
+                                  {a.withdrawal.frequency !== "oneoff" && <div className="rec-field"><label>Ends</label><Anchor value={a.withdrawal.end} owner={a.owner || "client1"} ectx={ectx} onChange={(v) => upWithdrawal(a.id, { end: v })} /></div>}
+                                </div>
+                                <span className="inl-note">{a.type === "pension" ? "Drawn from the owner's retirement age. " : ""}Paid out as income (a "Planned drawdown" band on the money chart) — never counted as an expense, so it can't be double-counted. Capped at the available balance.</span>
+                              </>)}
+                            </div>
+                          )}
                           {couple && <span className="inl-note">Passes to the survivor on death.</span>}
                           <button className="del-row" onClick={() => rmAsset(a.id)}><Trash2 size={13} /> Remove</button>
                         </div>
@@ -1806,6 +1856,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="cash-title">Money in vs money out<span>{stress || ci || survivorOverlay ? (survivorOverlay ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : "showing the stressed scenario — income/spending under the shock") : "each year · hover for the breakdown by source"}</span></div>
               <div className="legend sm">
                 <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
+                {hasPlannedDraw && <span><i style={{ background: DRAWDOWN_COLOR }} /> Planned drawdown</span>}
                 <span><i style={{ background: t.amber }} /> Drawn from savings</span>
                 <span><i style={{ background: t.red }} /> Shortfall</span>
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
@@ -1823,6 +1874,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   <Tooltip content={<FlowTip />} cursor={{ fill: t.grid }} position={{ y: 10 }} />
                   {incomes.map((i) => <Bar key={i.id} dataKey={iKey(i.id)} stackId="mio" fill={incColors[i.id]} fillOpacity={0.9} isAnimationActive={false} />)}
+                  {hasPlannedDraw && <Bar dataKey="plannedDraw" stackId="mio" fill={DRAWDOWN_COLOR} fillOpacity={0.92} isAnimationActive={false} />}
                   <Bar dataKey="coveredBySavings" stackId="mio" fill={t.amber} fillOpacity={0.85} isAnimationActive={false} />
                   <Bar dataKey="uncovered" stackId="mio" fill={t.red} fillOpacity={0.9} isAnimationActive={false} radius={[2, 2, 0, 0]} />
                   <Line type="monotone" dataKey="expenditure" stroke={t.line} strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -2215,7 +2267,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <tr><td>Years with a one-off draw</td><td className="r num">{cashGap.isolatedYears.join(", ")}</td></tr>
                           <tr><td>Largest draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
                           <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
-                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</td></tr>}
+                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</b></td></tr>}
                         </tbody>
                       </table>
                       <p className="rep-p">These appear as isolated orange bars on the money chart; there is no sustained reliance on savings. Figures in {basis.toLowerCase()}.</p>
@@ -2227,7 +2279,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <tr><td>Typical annual draw (first five years)</td><td className="r num">{m(cashGap.avgDraw)}</td></tr>
                           <tr><td>Largest annual draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
                           <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
-                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</td></tr>}
+                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</b></td></tr>}
                         </tbody>
                       </table>
                       <p className="rep-p">{cashGap.uncoveredCount > 0 ? "Where the gap cannot be met, spending in those years exceeds both income and remaining accessible assets — shown in red on the money chart." : "Every gap year is fully met from accessible assets under the current assumptions."} Figures in {basis.toLowerCase()}.</p>
@@ -2281,13 +2333,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <thead><tr><th></th><th className="r">Income/yr</th><th className="r">Life {protMult.life}× benchmark</th><th className="r">In force</th><th className="r">Life gap</th><th className="r">CI {protMult.ci}× benchmark</th><th className="r">In force</th><th className="r">CI gap</th></tr></thead>
                         <tbody>
                           {protGap.bench.map((b) => (
-                            <tr key={b.k}><td>{b.k === "client2" ? dfn2 : dfn1}</td><td className="r num">{m(b.inc)}</td><td className="r num">{m(b.lifeNeed)}</td><td className="r num">{m(b.lifeHave)}</td><td className="r num">{b.lifeGap > 0 ? m(b.lifeGap) : "—"}</td><td className="r num">{m(b.ciNeed)}</td><td className="r num">{m(b.ciHave)}</td><td className="r num">{b.ciGap > 0 ? m(b.ciGap) : "—"}</td></tr>
+                            <tr key={b.k}><td>{b.k === "client2" ? dfn2 : dfn1}</td><td className="r num">{m(b.inc)}</td><td className="r num">{m(b.lifeNeed)}</td><td className="r num">{m(b.lifeHave)}</td><td className="r num">{b.lifeGap > 0 ? <b className="rep-gap-fig">{m(b.lifeGap)}</b> : "—"}</td><td className="r num">{m(b.ciNeed)}</td><td className="r num">{m(b.ciHave)}</td><td className="r num">{b.ciGap > 0 ? <b className="rep-gap-fig">{m(b.ciGap)}</b> : "—"}</td></tr>
                           ))}
                         </tbody>
                       </table>
                       <p className="rep-p rep-small">Benchmarks are a rule-of-thumb starting point ({protMult.life}× income for life cover, {protMult.ci}× for critical illness; joint income split equally). They are not a needs analysis.</p>
                       {protGap.survivor && protGap.survivor.map((sv) => (
-                        <p className="rep-p" key={sv.k}>If {sv.k === "client2" ? dfn2 : dfn1} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor's plan {sv.funded ? "remains funded to the end of the projection" : `runs short from ${sv.firstShortYear} by ${m(sv.totalShortReal)} in total (today's money) — additional cover of ${sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)} at death would close the gap`}.</p>
+                        <p className="rep-p" key={sv.k}>If {sv.k === "client2" ? dfn2 : dfn1} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor's plan {sv.funded ? "remains funded to the end of the projection" : `runs short from ${sv.firstShortYear}`}{!sv.funded ? <> by <b className="rep-gap-fig">{m(sv.totalShortReal)}</b> in total (today's money) — additional cover of <b className="rep-gap-fig">{sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)}</b> at death would close the gap</> : null}.</p>
                       ))}
                     </>)}
                     {protSnap && protSnap.firstDeath && (
@@ -2583,6 +2635,7 @@ const CSS = `
 .gap-stat b{color:var(--ink);font-weight:600;}
 .gap-stat-ok{color:var(--green);font-weight:600;}
 .gap-stat-red{color:var(--red);font-weight:600;}
+.rep-gap-fig{color:#c62828;font-weight:700;}
 .tax-lifetime{display:flex;align-items:baseline;gap:10px;border:1px solid var(--border);border-radius:11px;padding:10px 14px;background:var(--bg);margin-top:4px;}
 .tax-lifetime span{font-size:12px;color:var(--mid);}
 .tax-lifetime b{font-size:16px;color:var(--ink);}
