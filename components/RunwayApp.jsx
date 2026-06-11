@@ -1058,6 +1058,45 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return { per, firstDeath };
   }, [reportOpen, protection, couple, markers.firstDeath, rows, ectx]);
 
+  // ---- Retirement income goal -----------------------------------------------------------------
+  // "I want £X/yr in retirement" → capital needed at a sustainable withdrawal rate, the gap vs the
+  // plan's projected investable capital at retirement, and the monthly contribution that closes it.
+  const RET_GOAL_KEY = "runway_ret_goal";
+  const [retGoal, setRetGoal] = useState(() => {
+    if (typeof window === "undefined") return { enabled: false, income: 60000, swr: 4 };
+    try { return { enabled: false, income: 60000, swr: 4, ...(JSON.parse(localStorage.getItem(RET_GOAL_KEY) || "{}") || {}) }; } catch { return { enabled: false, income: 60000, swr: 4 }; }
+  });
+  const upRetGoal = (patch) => setRetGoal((g) => { const n = { ...g, ...patch }; try { localStorage.setItem(RET_GOAL_KEY, JSON.stringify(n)); } catch {} return n; });
+  const retGoalCalc = useMemo(() => {
+    if (!retGoal.enabled) return null;
+    const target = Number(retGoal.income) || 0;
+    const swr = Math.min(20, Math.max(0.5, Number(retGoal.swr) || 4)) / 100;
+    if (target <= 0) return null;
+    const requiredCapital = target / swr;
+    // Plan's projected INVESTABLE capital at the first client's retirement, excludes property.
+    // Deflated to today's money so it compares like-for-like with the target the client states
+    // in today's terms (target ÷ SWR is a today's-money figure).
+    const retYear = baseYear + Math.max(0, ectx.retC1 - ectx.age0c1);
+    const retRow = rows.find((r) => r.c1Age === ectx.retC1) || rows.find((r) => r.year >= retYear);
+    const yearsToRet = Math.max(0, ectx.retC1 - ectx.age0c1);
+    const fAtRet = Math.pow(1 + inflDec, yearsToRet);
+    const projInvestable = retRow ? Math.max(0, (retRow.total || 0) - (retRow.property || 0)) / fAtRet : 0;
+    const projIncome = projInvestable * swr;
+    const capitalGap = requiredCapital - projInvestable;
+    const incomeGap = target - projIncome;
+    // Monthly contribution (into a pot growing at the plan's blended return) to close the capital gap.
+    let monthly = null;
+    if (capitalGap > 0 && yearsToRet > 0) {
+      const invAssets = assets.filter((a) => a.type === "investment" || a.type === "pension");
+      const blended = invAssets.length ? invAssets.reduce((s, a) => s + (Number(a.growthRate) || 0), 0) / invAssets.length : (Number(assumptions.inflation) || 0) + 3;
+      const realRate = Math.max(0, (blended - (Number(assumptions.inflation) || 0)) / 100); // real terms (figures are today's money)
+      const n = yearsToRet * 12, rM = realRate / 12;
+      const fvFactor = rM > 0 ? (Math.pow(1 + rM, n) - 1) / rM : n;
+      monthly = fvFactor > 0 ? capitalGap / fvFactor : null;
+    }
+    return { target, swr: swr * 100, requiredCapital, projInvestable, projIncome, capitalGap, incomeGap, onTrack: capitalGap <= 0, yearsToRet, monthly };
+  }, [retGoal, rows, ectx, baseYear, assets, assumptions.inflation, inflDec]);
+
   // ---- Protection gap analysis ----------------------------------------------------------------
   // Two layers: (1) rule-of-thumb benchmarks (house multipliers × current income), and
   // (2) the engine-driven survivor test — simulate death at a chosen age and solve for the
@@ -1482,6 +1521,32 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     </div>
                   )}
                 </div>
+                <div className="goalp">
+                  <div className="goalp-head"><span className="flbl">Retirement income goal <InfoTip text="Enter the annual retirement income the client wants. Using a sustainable withdrawal rate (4% is the common rule of thumb), this shows the capital required, the gap versus what the plan currently projects at retirement, and the extra monthly saving that would close it. A planning illustration, not advice." /></span><button className="goalp-toggle" onClick={() => upRetGoal({ enabled: !retGoal.enabled })}><span className={`toggle sm ${retGoal.enabled ? "on" : ""}`} aria-hidden="true"><span /></span></button></div>
+                  {retGoal.enabled && (<>
+                    <div className="goalp-inputs">
+                      <div className="rec-field"><label>Desired income / yr</label><Money value={retGoal.income} symbol={sym} onChange={(v) => upRetGoal({ income: v })} /></div>
+                      <div className="rec-field"><label>Withdrawal rate</label><Mini value={retGoal.swr} step={0.1} suffix="%" onChange={(v) => upRetGoal({ swr: v })} /></div>
+                    </div>
+                    {retGoalCalc && (
+                      <div className={`goalp-out ${retGoalCalc.onTrack ? "on-track" : "gap"}`}>
+                        {retGoalCalc.onTrack ? (
+                          <div className="goalp-verdict ok">✓ On track — the plan projects {fmtFull(retGoalCalc.projInvestable, cur)} of investable capital at retirement, supporting about {fmtFull(retGoalCalc.projIncome, cur)}/yr at {retGoalCalc.swr}%.</div>
+                        ) : (
+                          <div className="goalp-verdict short">Projected income falls short by <b className="goalp-redfig">{fmtFull(retGoalCalc.incomeGap, cur)}/yr</b>.</div>
+                        )}
+                        <div className="goalp-rows">
+                          <div className="goalp-row"><span>Capital required ({retGoalCalc.swr}% rule)</span><b className="num">{fmtFull(retGoalCalc.requiredCapital, cur)}</b></div>
+                          <div className="goalp-row"><span>Projected at retirement</span><b className="num">{fmtFull(retGoalCalc.projInvestable, cur)}</b></div>
+                          {!retGoalCalc.onTrack && <div className="goalp-row"><span>Capital gap</span><b className="num goalp-redfig">{fmtFull(retGoalCalc.capitalGap, cur)}</b></div>}
+                          {!retGoalCalc.onTrack && retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <div className="goalp-row"><span>Extra saving to close it</span><b className="num goalp-redfig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></div>}
+                          {!retGoalCalc.onTrack && retGoalCalc.yearsToRet === 0 && <div className="goalp-row"><span></span><span className="inl-note">Already at retirement — close the gap with additional capital or a lower income target.</span></div>}
+                        </div>
+                        <span className="field-note">Today's money. "Investable capital" excludes property. Extra saving assumes the plan's blended real return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
+                      </div>
+                    )}
+                  </>)}
+                </div>
                 <p className="ed-hint">Per-asset growth is set on each asset. Mortality is set per client. Charges &amp; fees module is next once we map your fee structure.</p>
               </div>
             )}
@@ -1611,6 +1676,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {incomes.length === 0 && <p className="empty-note">No income yet. Add salary, rental, dividends or pension income with start and end dates.</p>}
                 {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => openSolo(i.id, incomes)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
                 <p className="ed-hint">End salary at "Retirement" and it tracks each person's retirement age. {couple ? "Set what happens to each income on that person's death." : ""}</p>
+
               </div>
             )}
             {section === "expenditure" && (
@@ -2374,7 +2440,21 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <tr><td>Projected estate at the end of the plan</td><td className="r num">{m(goal.estateEnd)} ({goal.estateEndYear})</td></tr>
                       </tbody>
                     </table>
-                    <p className="rep-p rep-small">Each answer adjusts a single lever in isolation and assumes it stays constant over time; combining changes gives different results. The one-off figure does not test the accessibility or tax treatment of specific assets. These are planning illustrations, not recommendations.</p>
+                    {retGoalCalc && (<>
+                      <h2 className="rep-h2" style={{ marginTop: 22 }}>Retirement income goal</h2>
+                      <p className="rep-p">Target income of <b>{m(retGoalCalc.target)}/yr</b> at a {retGoalCalc.swr}% sustainable withdrawal rate.</p>
+                      <table className="rep-table">
+                        <tbody>
+                          <tr><td>Capital required</td><td className="r num">{m(retGoalCalc.requiredCapital)}</td></tr>
+                          <tr><td>Projected investable capital at retirement</td><td className="r num">{m(retGoalCalc.projInvestable)}</td></tr>
+                          {retGoalCalc.onTrack
+                            ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
+                            : <><tr><td>Capital gap</td><td className="r num"><b className="rep-gap-fig">{m(retGoalCalc.capitalGap)}</b></td></tr>
+                               {retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <tr><td>Additional saving to close the gap</td><td className="r num"><b className="rep-gap-fig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></td></tr>}</>}
+                        </tbody>
+                      </table>
+                      <p className="rep-p rep-small">Figures in today's money; investable capital excludes property. The required capital applies the stated withdrawal rate as a rule of thumb — it is a planning illustration, not a recommendation or a guarantee of sustainable income.</p>
+                    </>)}
                     <RepFoot />
                   </section>
                 )}
@@ -2643,6 +2723,20 @@ const CSS = `
 .gap-stat-ok{color:var(--green);font-weight:600;}
 .gap-stat-red{color:var(--red);font-weight:600;}
 .rep-gap-fig{color:#c62828;font-weight:700;}
+.goalp{margin-top:14px;border:1px solid var(--border);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:9px;}
+.goalp-head{display:flex;align-items:center;justify-content:space-between;}
+.goalp-toggle{background:none;border:none;cursor:pointer;padding:0;}
+.goalp-inputs{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.goalp-out{border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:8px;}
+.goalp-out.on-track{background:color-mix(in srgb, var(--green) 9%, var(--card));border:1px solid color-mix(in srgb, var(--green) 28%, var(--card));}
+.goalp-out.gap{background:color-mix(in srgb, var(--amber) 8%, var(--card));border:1px solid color-mix(in srgb, var(--amber) 26%, var(--card));}
+.goalp-verdict{font-size:12.5px;line-height:1.5;}
+.goalp-verdict.ok{color:var(--green);font-weight:600;}
+.goalp-verdict.short{color:var(--mid);}
+.goalp-rows{display:flex;flex-direction:column;gap:4px;}
+.goalp-row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mid);gap:10px;}
+.goalp-row .num{color:var(--ink);}
+.goalp-redfig{color:#c62828;font-weight:700;}
 .tax-lifetime{display:flex;align-items:baseline;gap:10px;border:1px solid var(--border);border-radius:11px;padding:10px 14px;background:var(--bg);margin-top:4px;}
 .tax-lifetime span{font-size:12px;color:var(--mid);}
 .tax-lifetime b{font-size:16px;color:var(--ink);}
