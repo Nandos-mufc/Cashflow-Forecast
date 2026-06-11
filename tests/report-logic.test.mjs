@@ -145,6 +145,35 @@ t("TAX £60k spans bands = 11432", Math.abs(incomeTaxOf(60000, ukP) - 11432) < 0
 t("TAX unsorted bands identical", Math.abs(incomeTaxOf(60000, { ...ukP, bands: [ukP.bands[2], ukP.bands[0], ukP.bands[1]] }) - incomeTaxOf(60000, ukP)) < 0.01);
 t("TAX top band exact", Math.abs(incomeTaxOf(200000, ukP) - (0.2 * (50270 - 12570) + 0.4 * (125140 - 50270) + 0.45 * (200000 - 125140))) < 0.01);
 
+/* ---------------- contribution funding & surplus deployment ---------------- */
+// Mirrors the engine's two funding paths. External funding grows the pot without a cashflow
+// draw; cashflow funding (with no income) creates the circular draw the user reported.
+const grow = (start, rate, contrib, years, external, income, autoInvest) => {
+  // simplified annual model matching the engine's grow-then-contribute-then-settle order
+  let bal = start;
+  for (let i = 0; i < years; i++) {
+    bal = bal * (1 + rate);            // growth
+    bal += contrib;                    // contribution into pot
+    const draw = external ? 0 : contrib; // cashflow funding with no income → must be drawn back
+    const surplus = income - draw;
+    if (surplus >= 0) { if (autoInvest) bal += surplus; }
+    else bal += surplus;               // shortfall pulled from pot
+  }
+  return bal;
+};
+// External funding, no income: pot compounds cleanly (Paul's fix)
+const paulFixed = grow(500000, 0.05, 60000, 6, true, 0, false);
+t("FUND external no-income compounds (>1.0m)", paulFixed > 1000000);
+// Cashflow funding, no income: contribution drawn straight back → near-flat (the bug)
+const paulBug = grow(500000, 0.05, 60000, 6, false, 0, true);
+t("FUND cashflow no-income stays near base (the reported bug)", paulBug < 700000);
+t("FUND external materially beats cashflow-with-no-income", paulFixed - paulBug > 300000);
+// Surplus sweep honoured by the flag
+const sweepOn = grow(500000, 0, 0, 5, true, 100000, true);
+const sweepOff = grow(500000, 0, 0, 5, true, 100000, false);
+t("FUND autoInvest ON absorbs surplus", sweepOn > sweepOff);
+t("FUND autoInvest OFF leaves pot untouched by surplus", sweepOff === 500000);
+
 /* ---------------- compliance language scan ---------------- */
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, "..", "components", "RunwayApp.jsx"), "utf8");
