@@ -128,10 +128,10 @@ const TAX_PRESETS = {
 };
 // Stress scenarios — each returns {yearOffset: growthDeltaPts}. Args: retirement year offset, plan end offset.
 const STRESS_SCENARIOS = [
-  { id: "crashNow", label: "Market crash now", desc: "A 2008-style fall early in the plan, with a partial bounce the year after.", build: () => ({ 0: -35, 1: 12 }) },
-  { id: "crashRet", label: "Crash at retirement", desc: "The dangerous one — markets fall just as drawdown begins (sequence-of-returns risk).", build: (r) => ({ [r]: -35, [r + 1]: 12 }) },
-  { id: "lostDecade", label: "Lost decade", desc: "Returns roughly 4 points lower than assumed for ten years.", build: () => { const o = {}; for (let i = 0; i < 10; i++) o[i] = -4; return o; } },
-  { id: "lowReturns", label: "Permanently lower returns", desc: "Returns 2 points below assumption for the entire plan.", build: (r, end) => { const o = {}; for (let i = 0; i <= end; i++) o[i] = -2; return o; } },
+  { id: "crashNow", label: "Market crash now", desc: "A −35% equity fall this year (2008-style), then a +12% partial rebound the next year. Applied on top of assumed growth.", build: () => ({ 0: -35, 1: 12 }) },
+  { id: "crashRet", label: "Crash at retirement", desc: "The dangerous one — a −35% fall in the retirement year with a +12% rebound after, just as drawdown begins (sequence-of-returns risk).", build: (r) => ({ [r]: -35, [r + 1]: 12 }) },
+  { id: "lostDecade", label: "Lost decade", desc: "Returns 4 percentage points below assumption for ten years, then back to normal.", build: () => { const o = {}; for (let i = 0; i < 10; i++) o[i] = -4; return o; } },
+  { id: "lowReturns", label: "Permanently lower returns", desc: "Returns 2 percentage points below assumption for the entire plan.", build: (r, end) => { const o = {}; for (let i = 0; i <= end; i++) o[i] = -2; return o; } },
 ];
 const NOTE_COLORS = ["#8b5cf6", "#0ea5e9", "#f59e0b", "#ec4899", "#14b8a6", "#6366f1"];
 const noteColor = (i) => NOTE_COLORS[i % NOTE_COLORS.length];
@@ -890,7 +890,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const sr = stressRows && stressRows[idx] ? stressRows[idx] : null;
     const flow = sr || r; // money-in-vs-out reflects the active scenario (e.g. CI salary drop, crash depletion)
     const o = { year: r.year, y: r.y, c1Age: r.c1Age, c2Age: r.c2Age, aliveC1: r.aliveC1, aliveC2: r.aliveC2, total: dz(r.total), property: dz(r.property), investable: dz(r.total - r.property), debt: dz(r.debt || 0), netWorth: dz(r.total - (r.debt || 0)), income: dz(flow.income), expenditure: dz(flow.expenditure), taxPaid: dz(flow.taxPaid || 0), contrib: dz(flow.contrib || 0), outgoings: dz(flow.expenditure + (flow.contrib || 0)), expEssential: dz(flow.expEssential || 0), expDiscretionary: dz(flow.expDiscretionary || 0), premiums: dz(flow.premiums || 0), liabRepay: dz(flow.liabRepay || 0) };
-    if (sr) o.stressed = dz(sr.total - (sr.debt || 0));
+    if (sr) {
+      o.stressed = dz(sr.total - (sr.debt || 0));
+      o.sTotal = dz(sr.total);
+      o.sInvestable = dz(sr.total - sr.property);
+      o.sDebt = dz(sr.debt || 0);
+      assets.forEach((a) => (o["s_" + aKey(a.id)] = dz(sr[aKey(a.id)] || 0)));
+    }
     if (compareMap && compareMap.has(r.year)) o.cmp = compareMap.get(r.year);
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
@@ -943,8 +949,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       depRet = useC2 ? ectx.retC2 : ectx.retC1;
     }
     const tone = depletionAge === null ? "green" : depletionAge < 88 ? "red" : "amber";
-    return { currentTotal, peak, atRetirement, endVal, endYear, depletionAge, depYear, depName, depRet, tone };
-  }, [rows, data, assets, liabilities, ectx, baseYear, couple, fn1, fn2]);
+    // Stressed variants — when a scenario (crash / CI / survivor) is active, the headline cards reflect it.
+    let s = null;
+    if (stressRows) {
+      const sEndVal = data.length ? (data[data.length - 1].stressed ?? data[data.length - 1].netWorth) : 0;
+      const sRetRow = data.find((r) => r.c1Age === ectx.retC1);
+      const sAtRetirement = ectx.retC1 <= ectx.age0c1 ? currentTotal : sRetRow ? (sRetRow.stressed ?? sRetRow.netWorth) : 0;
+      const sDepRow = stressRows.find((r) => r.shortfall > 0);
+      let sDepletionAge = null, sDepYear = null;
+      if (sDepRow) { const useC2 = couple && !sDepRow.aliveC1 && sDepRow.aliveC2; sDepletionAge = useC2 ? sDepRow.c2Age : sDepRow.c1Age; sDepYear = sDepRow.year; }
+      const sTone = sDepletionAge === null ? "green" : sDepletionAge < 88 ? "red" : "amber";
+      s = { atRetirement: sAtRetirement, endVal: sEndVal, depletionAge: sDepletionAge, depYear: sDepYear, tone: sTone };
+    }
+    return { currentTotal, peak, atRetirement, endVal, endYear, depletionAge, depYear, depName, depRet, tone, s };
+  }, [rows, data, assets, liabilities, ectx, baseYear, couple, fn1, fn2, stressRows]);
 
   const banner = useMemo(() => {
     if (kpis.depletionAge === null) return { tone: "green", Icon: CheckCircle2, text: "Plan is fully funded — investable assets last to the end of the plan." };
@@ -989,7 +1007,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   /* ---- Report configuration & derived analysis ---------------------------------------------- */
   const REPORT_CFG_KEY = "runway_report_cfg";
   const defaultReportCfg = () => ({
-    sections: { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
+    sections: { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
     anonymous: false, adviser: "", firm: "",
   });
   const [reportCfg, setReportCfg] = useState(() => {
@@ -1001,6 +1019,29 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [copiedSummary, setCopiedSummary] = useState(false);
   const upReportCfg = (patch) => setReportCfg((c) => { const n = { ...c, ...patch, sections: { ...c.sections, ...(patch.sections || {}) } }; try { localStorage.setItem(REPORT_CFG_KEY, JSON.stringify(n)); } catch {} return n; });
   const stressActive = !!stressImpact;
+
+  // Year-by-year summary at key ages — the Voyant/CashCalc-style table for the report.
+  // Picks: now, every 5 years, each retirement, first death, depletion year, and plan end.
+  const yearTable = useMemo(() => {
+    if (!rows.length) return [];
+    const want = new Set();
+    want.add(rows[0].year);
+    rows.forEach((r) => { if ((r.c1Age % 5) === 0) want.add(r.year); });
+    if (markers.retC1) want.add(markers.retC1);
+    if (markers.retC2) want.add(markers.retC2);
+    if (markers.firstDeath) want.add(markers.firstDeath);
+    if (kpis.depYear) want.add(kpis.depYear);
+    want.add(rows[rows.length - 1].year);
+    const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+    return rows.filter((r) => want.has(r.year)).map((r) => {
+      const netWorth = defl(r.total - (r.debt || 0), r.y);
+      const investable = defl(r.total - r.property, r.y);
+      const income = defl(r.income + (r.plannedDraw || 0), r.y);
+      const spend = defl(r.expenditure, r.y);
+      const surplus = income - spend;
+      return { year: r.year, c1Age: r.c1Age, c2Age: r.c2Age, aliveC1: r.aliveC1, aliveC2: r.aliveC2, netWorth, investable, income, spend, surplus, shortfall: defl(r.shortfall || 0, r.y), isRet: r.year === markers.retC1 || r.year === markers.retC2, isDep: r.year === kpis.depYear };
+    });
+  }, [rows, markers, kpis, showReal, inflDec]);
 
   // Cash gap analysis — base plan (ignores any active stress overlay), in the report's money basis.
   // Three states: no draw at all · one-off years only · sustained drawdown.
@@ -1363,15 +1404,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (!active || !payload || !payload.length) return null;
     const d = payload[0].payload;
     const yearPayouts = payoutEvents.filter((e) => e.year === d.year);
+    const stressed = d.stressed != null; // a scenario (crash / CI / survivor) is active
+    const av = (a) => (stressed ? (d["s_" + aKey(a.id)] || 0) : (d[aKey(a.id)] || 0));
+    const sNet = stressed ? (d.sTotal - (d.sDebt || 0)) : d.netWorth;
+    const delta = stressed ? sNet - d.netWorth : 0;
     return (
       <div className="tip">
         <div className="tip-head"><b className="num">{d.year}</b> <span className="tip-yr">{agesLabel(d)}</span></div>
-        <div className="tip-total"><span>Net worth</span><b className="num">{fmtFull(d.total, cur)}</b></div>
+        <div className="tip-total"><span>Net worth{stressed ? " (current plan)" : ""}</span><b className="num">{fmtFull(d.total, cur)}</b></div>
+        {stressed && <div className="tip-total tip-stress"><span>Under the scenario</span><b className="num">{fmtFull(d.sTotal, cur)}</b></div>}
+        {stressed && Math.abs(delta) >= 1 && <div className="tip-row tip-stress-delta"><span className="tip-name">Impact</span><span className="num">{delta < 0 ? "−" : "+"}{fmtFull(Math.abs(delta), cur)}</span></div>}
         <div className="tip-rule" />
-        {tooltipOrder.map((a) => <div className="tip-row" key={a.id}><span className="tip-name"><i style={{ background: colors[a.id] }} /> {a.name}</span><span className="num">{fmtFull(d[aKey(a.id)] || 0, cur)}</span></div>)}
-        {hasProperty && <div className="tip-row tip-sub"><span>Spendable (excl. property)</span><span className="num">{fmtFull(d.investable, cur)}</span></div>}
-        {d.debt > 0 && <div className="tip-row"><span className="tip-name">Less: debts</span><span className="num">−{fmtFull(d.debt, cur)}</span></div>}
-        {d.debt > 0 && <div className="tip-total"><span>Net worth after debts</span><b className="num">{fmtFull(d.netWorth, cur)}</b></div>}
+        {stressed && <div className="tip-bd-label">Assets under the scenario</div>}
+        {tooltipOrder.map((a) => <div className="tip-row" key={a.id}><span className="tip-name"><i style={{ background: colors[a.id] }} /> {a.name}</span><span className="num">{fmtFull(av(a), cur)}</span></div>)}
+        {hasProperty && <div className="tip-row tip-sub"><span>Spendable (excl. property)</span><span className="num">{fmtFull(stressed ? d.sInvestable : d.investable, cur)}</span></div>}
+        {(stressed ? d.sDebt : d.debt) > 0 && <div className="tip-row"><span className="tip-name">Less: debts</span><span className="num">−{fmtFull(stressed ? d.sDebt : d.debt, cur)}</span></div>}
+        {(stressed ? d.sDebt : d.debt) > 0 && <div className="tip-total"><span>Net worth after debts</span><b className="num">{fmtFull(sNet, cur)}</b></div>}
         {yearPayouts.length > 0 && <><div className="tip-rule" />{yearPayouts.map((e, i) => <div key={i} className="tip-row" style={{ color: t.green }}><span className="tip-name" style={{ color: t.green }}>↑ {e.label}</span><span className="num">received</span></div>)}</>}
         {d.taxPaid > 0 && <><div className="tip-rule" /><div className="tip-row"><span className="tip-name">Tax on withdrawals</span><span className="num">−{fmtFull(d.taxPaid, cur)}</span></div></>}
       </div>
@@ -1522,7 +1570,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   )}
                 </div>
                 <div className="goalp">
-                  <div className="goalp-head"><span className="flbl">Retirement income goal <InfoTip text="Enter the annual retirement income the client wants. Using a sustainable withdrawal rate (4% is the common rule of thumb), this shows the capital required, the gap versus what the plan currently projects at retirement, and the extra monthly saving that would close it. A planning illustration, not advice." /></span><button className="goalp-toggle" onClick={() => upRetGoal({ enabled: !retGoal.enabled })}><span className={`toggle sm ${retGoal.enabled ? "on" : ""}`} aria-hidden="true"><span /></span></button></div>
+                  <div className="goalp-head"><span className="flbl">Retirement income goal <InfoTip text="Enter the annual retirement income the client wants. Using a sustainable withdrawal rate (4% is the common rule of thumb), this shows the capital required, the gap versus what the plan currently projects at retirement, and the extra monthly saving that would close it. A planning illustration, not advice." /></span><Toggle on={retGoal.enabled} onClick={() => upRetGoal({ enabled: !retGoal.enabled })} /></div>
                   {retGoal.enabled && (<>
                     <div className="goalp-inputs">
                       <div className="rec-field"><label>Desired income / yr</label><Money value={retGoal.income} symbol={sym} onChange={(v) => upRetGoal({ income: v })} /></div>
@@ -1844,9 +1892,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         <main className="chartwrap">
           <div className="stats">
             <Stat label="Net worth today" value={fmtCompact(kpis.currentTotal, cur)} sub={couple ? `${fn1} ${ectx.age0c1} · ${fn2} ${ectx.age0c2}` : `age ${ectx.age0c1}`} />
-            <Stat label="At retirement" value={fmtCompact(kpis.atRetirement, cur)} sub={ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`} />
-            <Stat label="Left at plan end" value={fmtCompact(kpis.endVal, cur)} sub={`in ${kpis.endYear}`} />
-            <Stat label="Plan longevity" value={kpis.depletionAge === null ? "Fully funded" : `Age ${kpis.depletionAge}`} sub={kpis.depletionAge === null ? `to ${kpis.endYear}` : kpis.depName ? `${kpis.depName} · spendable funds short` : "spendable funds run short"} tone={kpis.tone} />
+            <Stat label={kpis.s ? "At retirement · scenario" : "At retirement"} value={fmtCompact(kpis.s ? kpis.s.atRetirement : kpis.atRetirement, cur)} sub={kpis.s ? `base ${fmtCompact(kpis.atRetirement, cur)}` : (ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`)} tone={kpis.s && kpis.s.atRetirement < kpis.atRetirement ? "red" : undefined} />
+            <Stat label={kpis.s ? "Left at plan end · scenario" : "Left at plan end"} value={fmtCompact(kpis.s ? kpis.s.endVal : kpis.endVal, cur)} sub={kpis.s ? `base ${fmtCompact(kpis.endVal, cur)}` : `in ${kpis.endYear}`} tone={kpis.s && kpis.s.endVal < kpis.endVal ? "red" : undefined} />
+            <Stat label={kpis.s ? "Plan longevity · scenario" : "Plan longevity"} value={(kpis.s ? kpis.s.depletionAge : kpis.depletionAge) === null ? "Fully funded" : `Age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}`} sub={kpis.s ? ((kpis.s.depletionAge === null ? "holds under scenario" : "funds short under scenario")) : (kpis.depletionAge === null ? `to ${kpis.endYear}` : kpis.depName ? `${kpis.depName} · spendable funds short` : "spendable funds run short")} tone={kpis.s ? kpis.s.tone : kpis.tone} />
           </div>
 
           <div className={`banner banner-${banner.tone}`}><banner.Icon size={17} /><span>{banner.text}</span></div>
@@ -1914,11 +1962,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {kpis.depYear && <ReferenceLine x={kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
                   {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
                   {showComposition
-                    ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
-                    : <Area type="monotone" dataKey="netWorth" stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
-                  {hasProperty && <Line type="monotone" dataKey="investable" stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
-                  {hasDebt && showComposition && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
-                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="stressed" stroke={t.red} strokeWidth={3} dot={false} isAnimationActive={false} />}
+                    ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
+                    : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
+                  {hasProperty && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sInvestable" : "investable"} stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
+                  {hasDebt && showComposition && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
+                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.mid} strokeWidth={1.7} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 70% 42%)" strokeWidth={2.5} dot={{ r: 2, fill: "hsl(185 70% 42%)", strokeWidth: 0 }} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
@@ -2083,7 +2131,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               </div>
               <div className={`ci-block ${ci ? "on" : ""}`}>
                 <div className="ci-head"><Shield size={14} /> Critical illness claim</div>
-                <div className="ci-text">Model a serious-illness diagnosis: a lump sum is paid and {couple ? "the affected person's" : "your"} salary-type income stops from that age. If already retired, only the lump sum applies.</div>
+                <div className="ci-text">Model a serious-illness diagnosis: a lump sum is paid and {couple ? "the affected person's" : "your"} salary-type income stops from that age. If already retired, only the lump sum applies. To show the impact of lost income with <b>no cover in place</b>, set the payout to {sym}0.</div>
                 <div className="rec-grid">
                   {couple && <div className="rec-field"><label>Who</label><Pick value={ciDraft.owner} onChange={(v) => setCiDraft((d) => ({ ...d, owner: v }))} options={ownerOpts.filter((o) => o.value !== "joint")} /></div>}
                   <div className="rec-field"><label>Age at claim</label><Mini value={ciDraft.age} step={1} onChange={(v) => setCiDraft((d) => ({ ...d, age: v }))} /></div>
@@ -2118,6 +2166,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           const SECTION_DEFS = [
             { id: "exec", label: "Executive summary" },
             { id: "snapshot", label: "Financial snapshot" },
+            { id: "yeartable", label: "Year-by-year summary" },
             { id: "charts", label: "Projection charts" },
             { id: "cashgap", label: "Cash gap analysis" },
             { id: "stress", label: "Stress test result", off: !stressActive, why: "no stress test active" },
@@ -2130,8 +2179,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           ];
           const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
           const setPreset = (kind) => {
-            const brief = { exec: true, snapshot: false, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
-            const comp = { exec: true, snapshot: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
+            const brief = { exec: true, snapshot: false, yeartable: true, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
+            const comp = { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
             upReportCfg({ sections: kind === "brief" ? brief : comp });
           };
           const verdictText = kpis.depletionAge === null
@@ -2219,8 +2268,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="rep-kpis">
                     <div className="rep-kpi"><span>Net worth today</span><b className="num">{m(kpis.currentTotal)}</b></div>
                     <div className="rep-kpi"><span>At retirement</span><b className="num">{m(kpis.atRetirement)}</b></div>
-                    <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
-                    <div className="rep-kpi"><span>Plan longevity</span><b className="num">{longevity}</b></div>
+                    <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className={`num ${kpis.endVal > 0 ? "rep-pos" : "rep-neg"}`}>{m(kpis.endVal)}</b></div>
+                    <div className="rep-kpi"><span>Plan longevity</span><b className={`num ${kpis.depletionAge === null ? "rep-pos" : kpis.tone === "red" ? "rep-neg" : "rep-warn"}`}>{longevity}</b></div>
                   </div>
                   <div className="rep-people">
                     <div className="rep-person"><b>{dfn1}</b><span>{anon ? `Age ${ectx.age0c1}` : `Born ${c1.dob}`} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
@@ -2273,6 +2322,38 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         </tbody>
                       </table>
                     </div>
+                    <RepFoot />
+                  </section>
+                )}
+
+                {/* Year-by-year summary */}
+                {on("yeartable") && yearTable.length > 0 && (
+                  <section className="report-page">
+                    <h2 className="rep-h2">Year-by-year summary</h2>
+                    <p className="rep-p">The plan at key ages — retirement, and at five-year intervals. {basis} Income includes planned drawdown; surplus is income less spending in that year.</p>
+                    <table className="rep-table rep-yt">
+                      <thead>
+                        <tr>
+                          <th>Year</th><th>{couple ? "Ages" : "Age"}</th>
+                          <th className="r">Net worth</th><th className="r">Spendable</th>
+                          <th className="r">Income</th><th className="r">Spending</th><th className="r">Surplus / (deficit)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {yearTable.map((r) => (
+                          <tr key={r.year} className={r.isDep ? "yt-dep" : r.isRet ? "yt-ret" : ""}>
+                            <td>{r.year}{r.isRet ? " ◆" : ""}{r.isDep ? " ▲" : ""}</td>
+                            <td>{couple ? `${r.aliveC1 ? r.c1Age : "—"} / ${r.aliveC2 ? r.c2Age : "—"}` : r.c1Age}</td>
+                            <td className="r num">{m(r.netWorth)}</td>
+                            <td className="r num">{m(r.investable)}</td>
+                            <td className="r num">{m(r.income)}</td>
+                            <td className="r num">{m(r.spend)}</td>
+                            <td className="r num" style={{ color: r.shortfall > 0 ? "#c62828" : r.surplus >= 0 ? "#1b7a4b" : "#b26a00", fontWeight: 600 }}>{r.surplus < 0 ? `(${m(Math.abs(r.surplus))})` : m(r.surplus)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="rep-p rep-small">◆ retirement year · ▲ year spendable funds run short. "Spendable" excludes property. Surplus shown in green, deficit funded by drawdown in amber, an unmet shortfall in red. {stressActive ? "Reflects the base plan; the stress scenario is on its own page. " : ""}Figures are {basis.toLowerCase()}</p>
                     <RepFoot />
                   </section>
                 )}
@@ -2725,7 +2806,6 @@ const CSS = `
 .rep-gap-fig{color:#c62828;font-weight:700;}
 .goalp{margin-top:14px;border:1px solid var(--border);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:9px;}
 .goalp-head{display:flex;align-items:center;justify-content:space-between;}
-.goalp-toggle{background:none;border:none;cursor:pointer;padding:0;}
 .goalp-inputs{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 .goalp-out{border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:8px;}
 .goalp-out.on-track{background:color-mix(in srgb, var(--green) 9%, var(--card));border:1px solid color-mix(in srgb, var(--green) 28%, var(--card));}
@@ -2737,6 +2817,11 @@ const CSS = `
 .goalp-row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mid);gap:10px;}
 .goalp-row .num{color:var(--ink);}
 .goalp-redfig{color:#c62828;font-weight:700;}
+.tip-stress span{color:var(--red);}
+.tip-stress b{color:var(--red);}
+.tip-stress-delta{color:var(--red);font-weight:600;}
+.tip-stress-delta .num{color:var(--red);}
+.tip-bd-label{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--low);margin-bottom:2px;}
 .tax-lifetime{display:flex;align-items:baseline;gap:10px;border:1px solid var(--border);border-radius:11px;padding:10px 14px;background:var(--bg);margin-top:4px;}
 .tax-lifetime span{font-size:12px;color:var(--mid);}
 .tax-lifetime b{font-size:16px;color:var(--ink);}
@@ -3016,6 +3101,14 @@ const CSS = `
 .rep-table th{text-align:left;font-weight:600;color:#7a8493;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;padding:7px 9px;border-bottom:1.5px solid #e6e9ee;}
 .rep-table td{padding:8px 9px;border-bottom:1px solid #f0f2f5;color:#2a3038;}
 .rep-table th.r,.rep-table td.r{text-align:right;}
+.rep-yt tbody tr.yt-ret{background:#f3f8ff;}
+.rep-yt tbody tr.yt-ret td{border-bottom-color:#dCe7f5;}
+.rep-yt tbody tr.yt-dep{background:#fff5f5;}
+.rep-yt tbody tr.yt-dep td{border-bottom-color:#f6dada;}
+.rep-yt td:first-child{font-weight:600;}
+.rep-pos{color:#1b7a4b;font-weight:600;}
+.rep-neg{color:#c62828;font-weight:600;}
+.rep-warn{color:#b26a00;font-weight:600;}
 .rep-empty{color:#9aa3b0;font-style:italic;}
 .rep-notes{margin:0;padding-left:18px;font-size:12.5px;color:#2a3038;line-height:1.7;}
 .rep-disc{font-size:11px;color:#7a8493;line-height:1.55;margin:0 0 10px;}
