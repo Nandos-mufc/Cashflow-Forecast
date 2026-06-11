@@ -457,7 +457,11 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     });
 
     const net = income - expenditure;
-    const freeAfter = net + plannedDraw - contribPersonal;
+    // Planned drawdown has already left the pot (bal reduced) and is cash in the client's hands.
+    // It funds spending; any part not needed is treated as consumed and does NOT get reinvested
+    // (reinvesting it would cycle the money pension→savings and leave net worth unchanged, which is wrong).
+    // Only genuine income surplus is available to auto-invest.
+    const incomeSurplus = net - contribPersonal;
 
     const drawList = () => {
       const out = [];
@@ -517,11 +521,14 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
 
     let shortfall = 0;
     let taxPaid = 0;
-    if (freeAfter >= 0) {
-      if (autoInvestSurplus) { const dest = surplusDest(); if (dest) bal[dest] += freeAfter; }
-      // else: surplus leaves the modelled plan (spent or held outside) rather than auto-sweeping into a pot.
+    if (incomeSurplus + plannedDraw >= 0) {
+      // Spending is covered by income and/or the planned drawdown.
+      // Reinvest only true income surplus; any planned drawdown beyond what spending needed is consumed.
+      const reinvest = Math.max(0, incomeSurplus);
+      if (autoInvestSurplus && reinvest > 0) { const dest = surplusDest(); if (dest) bal[dest] += reinvest; }
     } else {
-      let need = -freeAfter;
+      // Even after the planned drawdown, spending isn't fully covered — auto-draw the remainder.
+      let need = -(incomeSurplus + plannedDraw);
       let taxableYr = 0;
       for (const a of drawList()) {
         if (need <= 0) break;
