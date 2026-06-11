@@ -291,7 +291,7 @@ function grossUpIncome(need, prior, period) {
   return hi;
 }
 
-function projectCashflow({ profile, assumptions, assets, incomes, expenses, liabilities = [], protection = [], lumpSums = [], incomeStop = null, shocks }) {
+function projectCashflow({ profile, assumptions, assets, incomes, expenses, liabilities = [], protection = [], lumpSums = [], incomeStop = null, shocks, autoInvestSurplus = true }) {
   const ctx = makeCtx(profile, assumptions);
   const couple = ctx.couple;
   const inflDec = (Number(assumptions.inflation) || 0) / 100;
@@ -400,7 +400,11 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
         const amt = flowForYear(c, y, ctx, inflDec) * frac;
         if (amt > 0) {
           bal[a.id] += amt;
-          if (c.source !== "employer" || a.type !== "pension") contribPersonal += amt;
+          // "external" funding = money from outside the modelled cashflow (illustrative growth, or a
+          // contribution funded separately). Grows the pot without reducing the year's free cash.
+          // "cashflow" (default) reduces free cash, as before. Employer pension is always external.
+          const fromCashflow = (c.funding || "cashflow") === "cashflow" && !(c.source === "employer" && a.type === "pension");
+          if (fromCashflow) contribPersonal += amt;
         }
       }
     });
@@ -488,8 +492,8 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     let shortfall = 0;
     let taxPaid = 0;
     if (freeAfter >= 0) {
-      const dest = surplusDest();
-      if (dest) bal[dest] += freeAfter;
+      if (autoInvestSurplus) { const dest = surplusDest(); if (dest) bal[dest] += freeAfter; }
+      // else: surplus leaves the modelled plan (spent or held outside) rather than auto-sweeping into a pot.
     } else {
       let need = -freeAfter;
       let taxableYr = 0;
@@ -789,9 +793,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return () => { try { document.head.removeChild(link); } catch (e) {} };
   }, []);
 
+  const autoInvest = effAssumptions.autoInvestSurplus !== false; // default on (back-compat)
   const rows = useMemo(
-    () => projectCashflow({ profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection }),
-    [effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection]
+    () => projectCashflow({ profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest }),
+    [effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest]
   );
   const stressShocks = useMemo(() => {
     if (!stress) return null;
@@ -804,7 +809,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return Math.max(0, Math.round((Number(ci.age) || age0) - age0));
   }, [ci, ectx]);
   const stressRows = useMemo(() => {
-    const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection };
+    const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
     if (ci) return projectCashflow({ ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear } });
     if (survivorOverlay) {
       const sovAge0 = survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1;
@@ -814,7 +819,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     }
     if (stressShocks) return projectCashflow({ ...baseArgs, shocks: stressShocks });
     return null;
-  }, [ci, ciClaimYear, survivorOverlay, stressShocks, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, ectx]);
+  }, [ci, ciClaimYear, survivorOverlay, stressShocks, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, ectx, autoInvest]);
   const colors = useMemo(() => buildColors(assets), [assets]);
   const incColors = useMemo(() => buildIncomeColors(incomes), [incomes]);
   const stackOrder = useMemo(() => [...assets].sort((a, b) => STACK_RANK[a.type] - STACK_RANK[b.type]), [assets]);
@@ -834,6 +839,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         assets: compareData.assets || [], incomes: compareData.incomes || [],
         expenses: compareData.expenses || [], liabilities: compareData.liabilities || [],
         protection: compareData.protection || [],
+        autoInvestSurplus: (compareData.assumptions || {}).autoInvestSurplus !== false,
       });
       const cInfl = (Number((compareData.assumptions || {}).inflation) || 0) / 100;
       const mp = new Map();
@@ -1053,7 +1059,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     // Survivor test — couples only; simulate death at the chosen age via a life-expectancy override.
     let survivor = null;
     if (couple) {
-      const baseArgs = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
+      const baseArgs = { profile, assumptions, assets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
       const deflTotal = (rs) => rs.reduce((s, r) => s + (r.shortfall || 0) / Math.pow(1 + inflDec, r.y), 0);
       survivor = ["client1", "client2"].map((k) => {
         const age0 = k === "client2" ? ectx.age0c2 : ectx.age0c1;
@@ -1408,6 +1414,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="ed-body">
                 <h2 className="ed-title">Assumptions</h2>
                 <div className="field"><label>Inflation rate</label><Mini value={assumptions.inflation} step={0.1} suffix="%" onChange={(v) => setAssumptions((a) => ({ ...a, inflation: v }))} /><span className="field-note">Drives every "with inflation" line and the today's-money view.</span></div>
+                <div className="field"><label>Surplus income</label><Seg value={assumptions.autoInvestSurplus === false ? "spend" : "invest"} onChange={(v) => setAssumptions((a) => ({ ...a, autoInvestSurplus: v === "invest" }))} options={[{ value: "invest", label: "Reinvested" }, { value: "spend", label: "Spent / external" }]} /><span className="field-note">{assumptions.autoInvestSurplus === false ? "Income above spending leaves the plan — pots grow only by their own returns and contributions. Best for illustrating a single investment." : "Income above spending is swept into the first cash or investment pot each year. Best for a full household plan."}</span></div>
                 <div className="risk-block">
                   <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
                   {riskOwnerKeys.map((k) => (
@@ -1528,6 +1535,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                                 {a.contribution.frequency !== "oneoff" && <div className="rec-field"><label>Ends</label><Anchor value={a.contribution.end} owner={a.owner || "client1"} ectx={ectx} onChange={(v) => upContrib(a.id, { end: v })} /></div>}
                               </div>
                               {a.type === "pension" && <div className="rec-field"><label>Source <InfoTip text="Personal contributions are paid from cashflow, so they reduce the surplus available each year. Employer contributions are added straight to the pot and don't affect the client's cashflow." /></label><Seg value={a.contribution.source} onChange={(v) => upContrib(a.id, { source: v })} options={[{ value: "personal", label: "Personal" }, { value: "employer", label: "Employer" }]} /><span className="inl-note">{a.contribution.source === "employer" ? "added to pot, doesn't reduce cashflow" : "funded from surplus"}</span></div>}
+                              <div className="rec-field"><label>Funded from <InfoTip text="Cashflow: the contribution is paid out of this plan's income, so it reduces the surplus each year — and if there isn't enough income, it's drawn from savings. Standalone: the money is assumed to come from outside the modelled cashflow, so the pot simply grows by the contribution with no withdrawal. Use Standalone to illustrate an investment's growth in isolation, without entering income and expenditure." /></label><Seg value={a.contribution.funding || "cashflow"} onChange={(v) => upContrib(a.id, { funding: v })} options={[{ value: "cashflow", label: "Cashflow" }, { value: "external", label: "Standalone" }]} /><span className="inl-note">{(a.contribution.funding || "cashflow") === "external" ? "illustrative — grows the pot, ignores cashflow" : "reduces this year's surplus"}</span></div>
                             </>)}
                           </div>
                           {couple && <span className="inl-note">Passes to the survivor on death.</span>}
