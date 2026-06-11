@@ -174,6 +174,29 @@ const sweepOff = grow(500000, 0, 0, 5, true, 100000, false);
 t("FUND autoInvest ON absorbs surplus", sweepOn > sweepOff);
 t("FUND autoInvest OFF leaves pot untouched by surplus", sweepOff === 500000);
 
+/* ---------------- planned withdrawals & surplus destination ---------------- */
+// Withdrawal is capped at the pot balance and surfaced separately from auto-draw so it
+// can't double-count. Surplus destination picks a specific account.
+const drawCapped = (bal, want) => Math.min(bal, Math.max(0, want));
+t("WD capped at balance", drawCapped(30000, 40000) === 30000);
+t("WD normal draw passes through", drawCapped(100000, 40000) === 40000);
+t("WD never negative", drawCapped(0, 40000) === 0);
+// MIMO gap excludes planned drawdown (no double-count): gap = max(0, spend - income - plannedDraw)
+const mimoGap = (spend, income, planned) => Math.max(0, spend - income - planned);
+t("WD planned draw removes the gap it funds", mimoGap(40000, 0, 40000) === 0);
+t("WD partial planned draw leaves residual gap", mimoGap(40000, 0, 25000) === 15000);
+t("WD planned draw above spend → no gap", mimoGap(40000, 0, 60000) === 0);
+// surplusDest: chosen id wins if it's a cash/investment asset, else fall back to first cash then investment
+const surplusDest = (assets, chosenId) => {
+  const chosen = chosenId && assets.find((a) => a.id === chosenId && (a.type === "cash" || a.type === "investment"));
+  if (chosen) return chosen.id;
+  return (assets.find((a) => a.type === "cash") || assets.find((a) => a.type === "investment") || assets[0] || {}).id;
+};
+const accts = [{ id: "c", type: "cash" }, { id: "i", type: "investment" }, { id: "p", type: "pension" }];
+t("WD surplus to chosen account", surplusDest(accts, "i") === "i");
+t("WD surplus falls back to cash first", surplusDest(accts, null) === "c");
+t("WD surplus ignores invalid (pension) choice", surplusDest(accts, "p") === "c");
+
 /* ---------------- compliance language scan ---------------- */
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, "..", "components", "RunwayApp.jsx"), "utf8");
