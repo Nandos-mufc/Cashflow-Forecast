@@ -40,6 +40,7 @@ import {
   CreditCard,
   Shield,
   StickyNote,
+  Home,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -1259,7 +1260,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
-    const liquidAssets = assets.filter((a) => a.type !== "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
     const curSpend = expenses.reduce((s, e) => { const a = Number(e.amount) || 0; if (e.frequency === "monthly") return s + a * 12; if (e.frequency === "annual") return s + a; return s; }, 0); // recurring annual spend (excludes one-offs)
 
     // Growth: percentage points added to every asset's assumed return (monotonic — more is better)
@@ -1272,10 +1272,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
     // Retirement: years shifted for both working clients (monotonic — later is better)
     const rTest = (d) => funded({ ...base, profile: { ...profile, client1: { ...profile.client1, retirementAge: (Number(profile.client1.retirementAge) || 0) + d }, client2: { ...profile.client2, retirementAge: (Number(profile.client2.retirementAge) || 0) + d } } });
+    const ret1Base = Number(profile.client1.retirementAge) || 0;
+    const ageNow1 = deriveAge(profile.client1.dob);
     let retire = null;
-    if (fundedNow) { let d = 0; while (d > -25 && rTest(d - 1)) d--; retire = d; }
+    if (fundedNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTest(d - 1)) d--; retire = d; }
     else { let d = 1; while (d <= 25 && !rTest(d)) d++; retire = d <= 25 ? d : null; }
-    const earliestRetAge = retire != null ? (Number(profile.client1.retirementAge) || 0) + retire : null;
+    const earliestRetAge = retire != null ? ret1Base + retire : null;
 
     // Spending: multiplier on every expense (monotonic — more is worse)
     const sTest = (f) => funded({ ...base, expenses: expenses.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })) });
@@ -1286,11 +1288,31 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     } else if (sTest(0.1)) { let a = 0.1, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
     const maxSpend = spend != null && curSpend > 0 ? curSpend * spend : null;
 
-    // Max one-off purchase today, still funded for life (monotonic — bigger is worse)
     const tmpExp = (extra) => ({ ...base, expenses: [...expenses, extra] });
-    const oTest = (amt) => funded(tmpExp({ id: "tmp_o", name: "one-off", amount: amt, frequency: "oneoff", escalation: "none", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
-    let maxOneOff = null;
-    if (fundedNow) { let a = 0, b = 5000000; if (oTest(b)) maxOneOff = b; else { for (let i = 0; i < 30; i++) { const m = (a + b) / 2; if (oTest(m)) a = m; else b = m; } maxOneOff = a; } }
+
+    // Largest one-off purchase TODAY — funded only from liquid assets (cash + investments marked
+    // available for drawdown). Pensions and property are deliberately excluded: spending those is a
+    // separate decision (tax, access, legacy). Two figures so the number actually means something:
+    //   · safe — plan still funds for life even with returns 2pts lower AND both clients to age 100
+    //   · max  — the most before the plan would just run short on current assumptions (no margin)
+    const liquidPool = assets.filter((a) => (a.type === "cash" || a.type === "investment") && a.drawdown).map((a) => ({ id: a.id, type: a.type, value: Math.max(0, Number(a.value) || 0) }));
+    const liquidToday = liquidPool.reduce((s, a) => s + a.value, 0);
+    const spendLiquid = (L) => { // remove £L of liquid up front (cash first, then investments); rest of plan untouched
+      let rem = L; const cut = {};
+      for (const a of [...liquidPool].sort((x, y) => (x.type === "cash" ? 0 : 1) - (y.type === "cash" ? 0 : 1))) { const take = Math.min(a.value, rem); cut[a.id] = take; rem -= take; if (rem <= 0) break; }
+      return { ...base, assets: assets.map((a) => (cut[a.id] ? { ...a, value: (Number(a.value) || 0) - cut[a.id] } : a)) };
+    };
+    const stressLiquid = (b) => ({ ...b, assets: b.assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) - 2 })), profile: { ...b.profile, client1: { ...b.profile.client1, lifeExpectancy: Math.max(100, Number(b.profile.client1.lifeExpectancy) || 0) }, client2: { ...b.profile.client2, lifeExpectancy: Math.max(100, Number(b.profile.client2.lifeExpectancy) || 0) } } });
+    const solveLiquid = (test) => { if (liquidToday <= 0 || !test(0)) return 0; if (test(liquidToday)) return liquidToday; let lo = 0, hi = liquidToday; for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (test(mid)) lo = mid; else hi = mid; } return lo; };
+    let oneOff = null;
+    if (fundedNow) {
+      const maxL = solveLiquid((L) => funded(spendLiquid(L)));
+      const safeL = solveLiquid((L) => funded(stressLiquid(spendLiquid(L))));
+      const aft = projectCashflow(spendLiquid(safeL)); const lastY = Math.max(0, aft.length - 1);
+      const fAft = Math.pow(1 + ((Number(assumptions.inflation) || 0) / 100), lastY);
+      const estateAfter = aft.length ? Math.max(0, (aft[lastY].total - (aft[lastY].debt || 0))) / fAft : 0;
+      oneOff = { liquidToday, safe: safeL, max: maxL, leftover: Math.max(0, liquidToday - safeL), estateAfter };
+    }
 
     // Max extra ongoing commitment (e.g. a new premium or rent), £/month, still funded (monotonic — bigger is worse)
     const mTest = (mo) => funded(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
@@ -1300,7 +1322,27 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     // Resilience: would the plan still hold if they lived to 100?
     const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
 
-    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, maxOneOff, maxMonthly, to100, estateEnd: kpis.endVal, estateEndYear: kpis.endYear, liquidAssets };
+    // Inflation headroom: how much higher could average inflation run before the plan breaks (monotonic — higher is worse).
+    const baseInfl = Number(assumptions.inflation) || 0;
+    const iTest = (extra) => funded({ ...base, assumptions: { ...assumptions, inflation: baseInfl + extra } });
+    let inflMax = null, inflCapped = false;
+    if (fundedNow) { if (iTest(10)) { inflMax = 10; inflCapped = true; } else { let a = 0, b = 10; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (iTest(m)) a = m; else b = m; } inflMax = a; } }
+
+    // Property as backstop: convert any property to liquid investments at today's value and see what changes.
+    const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
+    let propRelease = null;
+    if (propVal > 0) {
+      const released = assets.map((a) => (a.type === "property" ? { ...a, type: "investment", drawdown: true } : a));
+      const rRows = projectCashflow({ ...base, assets: released });
+      const rDep = rRows.find((r) => r.shortfall > 0);
+      const lastY = Math.max(0, rRows.length - 1);
+      const fAft = Math.pow(1 + baseInfl / 100, lastY);
+      const rEstate = rRows.length ? Math.max(0, (rRows[lastY].total - (rRows[lastY].debt || 0))) / fAft : 0;
+      const depAge = rDep ? (couple && !rDep.aliveC1 && rDep.aliveC2 ? rDep.c2Age : rDep.c1Age) : null;
+      propRelease = { propVal, nowFunded: !rDep, depAge, estate: rEstate };
+    }
+
+    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
   }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
@@ -2058,9 +2100,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             else if (goal.growth != null)
               cards.push({ Icon: TrendingUp, verdict: "head", q: "What if my investments underperform?", text: `Returns could be up to ${Math.abs(goal.growth).toFixed(1)} percentage points lower across all assets and the plan would still last for life.`, note: "Applies a uniform downward shift to every asset simultaneously — a blunt but useful stress test. Individual asset underperformance could vary." });
 
-            // ONE-OFF
-            if (goal.maxOneOff != null)
-              cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: goal.maxOneOff >= 5000000 ? `Even a very large one-off purchase today leaves the plan funded for life. Your liquid assets stand at ${m(goal.liquidAssets)}.` : `A one-off of about ${m(goal.maxOneOff)} today and the plan would still last for life. Your liquid assets currently stand at ${m(goal.liquidAssets)}.`, note: "The model draws the amount from your liquid assets (non-property). It does not check whether those assets are accessible or whether selling them triggers tax or penalties. It does not model property, locked pensions, or assets with surrender charges." });
+            // INFLATION
+            if (goal.inflCapped)
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `The plan is highly resilient to inflation — even sustained inflation well above the assumed ${goal.baseInfl}% a year wouldn't break it.`, note: "Higher inflation pushes up spending each year (and any inflation-linked costs), while incomes only keep pace if you've set them to escalate. Fixed incomes lose ground fastest. A blunt average-inflation test, not a year-by-year forecast." });
+            else if (goal.inflMax != null)
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `Average inflation could run up to about ${(goal.baseInfl + goal.inflMax).toFixed(1)}% a year — roughly ${goal.inflMax.toFixed(1)} point${goal.inflMax >= 1.5 ? "s" : ""} above the ${goal.baseInfl}% assumed — and the plan would still last for life.`, note: "Higher inflation raises spending each year while fixed incomes lose ground. Incomes you've set to escalate with inflation keep pace; those set flat don't — they're the most exposed. Tests average inflation across the whole plan." });
+
+            // ONE-OFF — liquid-only, with a safe figure and an absolute ceiling, each explained.
+            if (goal.oneOff != null) {
+              const oo = goal.oneOff;
+              if (oo.liquidToday <= 0)
+                cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: "There are no cash or investment assets marked available for drawdown, so there's nothing liquid to fund a one-off purchase from today.", note: "A one-off here is funded only from cash and investments you've marked available for drawdown — not pensions or property." });
+              else if (oo.safe <= 0)
+                cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: <>There's no <b>safe</b> room for a one-off right now — spending any of your cash or investments today would put the plan at risk if returns disappoint or you live longer than expected. The most you could spend before the plan would run short on current assumptions is about <b>{m(oo.max)}</b>, but that leaves no margin at all.</>, note: "Funded only from cash and investments marked available for drawdown — pensions and property are excluded. \u201CSafe\u201D means the plan still funds for life even with returns 2 points lower across all assets and both of you living to 100. Today's money; ignores any tax on a sale." });
+              else
+                cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: <>About <b>{m(oo.safe)}</b> today, taken from your cash and investments and leaving pensions and property untouched — with the plan still funded for life <i>even if</i> returns run 2 points lower and you both live to 100. That would leave roughly {m(oo.leftover)} in accessible savings and a projected estate of about {m(oo.estateAfter)} at the end of the plan. Stretching further, the most you could spend before the plan would run short on current assumptions is {m(oo.max)} — but that keeps no margin for poor markets or a longer life.</>, note: "Funded only from cash and investments you've marked available for drawdown — pensions and property are deliberately excluded, as spending those involves tax, access and your legacy. Figures are in today's money and ignore any tax or penalty on a sale." });
+            }
 
             // MONTHLY
             if (goal.maxMonthly != null)
@@ -2087,6 +2142,17 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           // ALWAYS SHOWN
           cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end of the plan (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.`, note: "In today's money (real terms). Before inheritance tax or estate costs. Based on current assumptions with no changes — actual estate will depend on actual returns and spending." });
           cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — longevity is a real risk worth planning for.", note: "All inputs unchanged. Spending and growth rates are held constant to age 100, which may overstate costs (older retirees often spend less) or understate them (long-term care). Consider this a conservative longevity stress test." });
+
+          // PROPERTY AS A BACKSTOP — only when property is held and currently treated as non-spendable.
+          if (goal.propRelease) {
+            const pr = goal.propRelease;
+            if (!goal.fundedNow && pr.nowFunded)
+              cards.push({ Icon: Home, verdict: "head", q: "What if I released my property?", text: <>Releasing your property (about <b>{m(pr.propVal)}</b>) into investments would take the plan from running short to <b>fully funded for life</b>. In effect, your home is the plan's backstop — the shortfall is a liquidity problem, not a wealth problem.</>, note: "Treats the property as sold at today's value and reinvested, ignoring sale costs, capital gains tax and the fact you need somewhere to live. A what-if to show the home's role — not a recommendation to sell." });
+            else if (!goal.fundedNow && !pr.nowFunded)
+              cards.push({ Icon: Home, verdict: "need", q: "What if I released my property?", text: <>Even releasing your property (about {m(pr.propVal)}) into investments wouldn't fully fund the plan on current assumptions{pr.depAge ? ` — it would extend to around age ${pr.depAge}` : ""}. The gap is larger than the home can cover, so it needs combining with other changes.</>, note: "Treats the property as sold at today's value and reinvested, before sale costs, capital gains tax or rehousing. Shows the home's role as a partial backstop only." });
+            else
+              cards.push({ Icon: Home, verdict: "info", q: "What if I released my property?", text: <>The plan already funds for life without touching your property (about {m(pr.propVal)}) — it sits as spare capacity and legacy. Released into investments, the projected estate would be about {m(pr.estate)}.</>, note: "Treats the property as sold at today's value and reinvested, ignoring sale costs, tax and rehousing. Most clients keep the home; this simply shows what it represents within the plan." });
+          }
           return (
             <div className="modal-scrim" onClick={() => setGoalOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -2515,9 +2581,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       <tbody>
                         <tr><td>How much could I spend each year and still be funded for life?</td><td className="r num">{goal.maxSpend != null ? `~${m(goal.maxSpend)}/yr` : "—"}</td></tr>
                         <tr><td>When could I retire at today's spending?</td><td className="r num">{goal.earliestRetAge != null ? `Age ${goal.earliestRetAge}` : "—"}</td></tr>
-                        <tr><td>Largest one-off purchase today, staying funded?</td><td className="r num">{goal.maxOneOff != null ? (goal.maxOneOff >= 5000000 ? "Over " + m(5000000) : `~${m(goal.maxOneOff)}`) : "—"}</td></tr>
+                        <tr><td>Largest one-off purchase today, from liquid assets (safe / maximum)</td><td className="r num">{goal.oneOff && goal.oneOff.liquidToday > 0 ? (goal.oneOff.safe > 0 ? `~${m(goal.oneOff.safe)} / ${m(goal.oneOff.max)}` : `none safely / ~${m(goal.oneOff.max)} max`) : "\u2014"}</td></tr>
                         <tr><td>Largest new permanent monthly cost, staying funded?</td><td className="r num">{goal.maxMonthly != null ? `~${sym}${Math.round(goal.maxMonthly).toLocaleString()}/mo` : "—"}</td></tr>
                         {!goal.to100 && goal.growth != null && <tr><td>Return uplift needed to fully fund the plan</td><td className="r num">+{goal.growth.toFixed(1)} pts on all assets</td></tr>}
+                        {goal.fundedNow && goal.inflMax != null && <tr><td>Inflation the plan can absorb before running short</td><td className="r num">{goal.inflCapped ? `well over ${(goal.baseInfl + goal.inflMax).toFixed(1)}%` : `up to ~${(goal.baseInfl + goal.inflMax).toFixed(1)}%/yr`}</td></tr>}
+                        {goal.propRelease && <tr><td>Releasing property ({m(goal.propRelease.propVal)})</td><td className="r num">{!goal.fundedNow ? (goal.propRelease.nowFunded ? "fully funds the plan" : goal.propRelease.depAge ? `extends to age ${goal.propRelease.depAge}` : "partial help") : `estate \u2192 ~${m(goal.propRelease.estate)}`}</td></tr>}
                         <tr><td>Projected estate at the end of the plan</td><td className="r num">{m(goal.estateEnd)} ({goal.estateEndYear})</td></tr>
                       </tbody>
                     </table>
