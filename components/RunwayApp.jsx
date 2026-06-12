@@ -1395,7 +1395,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const baseInfl = Number(assumptions.inflation) || 0;
     const iTest = (extra) => funded({ ...base, assumptions: { ...assumptions, inflation: baseInfl + extra } });
     let inflMax = null, inflCapped = false;
-    if (fundedNow) { if (iTest(10)) { inflMax = 10; inflCapped = true; } else { let a = 0, b = 10; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (iTest(m)) a = m; else b = m; } inflMax = a; } }
+    if (fundedNow) { if (iTest(20)) { inflMax = 20; inflCapped = true; } else { let a = 0, b = 20; for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (iTest(m)) a = m; else b = m; } inflMax = a; } }
 
     // Property as backstop: convert any property to liquid investments at today's value and see what changes.
     const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
@@ -2190,9 +2190,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
             // INFLATION
             if (goal.inflCapped)
-              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `The plan is highly resilient to inflation — even sustained inflation well above the assumed ${goal.baseInfl}% a year wouldn't break it.`, note: "Higher inflation pushes up spending each year (and any inflation-linked costs), while incomes only keep pace if you've set them to escalate. Fixed incomes lose ground fastest. A blunt average-inflation test, not a year-by-year forecast." });
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `The plan remains viable with average inflation above ${(goal.baseInfl + goal.inflMax).toFixed(1)}% a year — the test ceiling. Above this level, spending may need to be reviewed.`, note: "Higher inflation pushes up spending each year (and any inflation-linked costs), while incomes only keep pace if you've set them to escalate. Fixed incomes lose ground fastest. A blunt average-inflation test across the whole plan — not a year-by-year forecast." });
             else if (goal.inflMax != null)
-              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `Average inflation could run up to about ${(goal.baseInfl + goal.inflMax).toFixed(1)}% a year — roughly ${goal.inflMax.toFixed(1)} point${goal.inflMax >= 1.5 ? "s" : ""} above the ${goal.baseInfl}% assumed — and the plan would still last for life.`, note: "Higher inflation raises spending each year while fixed incomes lose ground. Incomes you've set to escalate with inflation keep pace; those set flat don't — they're the most exposed. Tests average inflation across the whole plan." });
+              cards.push({ Icon: TrendingUp, verdict: "head", q: "What if inflation runs higher?", text: `The plan remains viable with average inflation up to approximately ${(goal.baseInfl + goal.inflMax).toFixed(1)}% a year. Above this level, spending may need to be reviewed.`, note: "Higher inflation raises spending each year while fixed incomes lose ground. Incomes you've set to escalate with inflation keep pace; those set flat don't — they're the most exposed. Tests average inflation across the whole plan." });
 
             // ONE-OFF — liquid-only, with a safe figure and an absolute ceiling, each explained.
             if (goal.oneOff != null) {
@@ -2202,7 +2202,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               else if (oo.safe <= 0)
                 cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: <>There's no <b>safe</b> room for a one-off right now — spending any of your cash or investments today would put the plan at risk if returns disappoint or you live longer than expected. The most you could spend before the plan would run short on current assumptions is about <b>{m(oo.max)}</b>, but that leaves no margin at all.</>, note: "Funded only from cash and investments marked available for drawdown — pensions and property are excluded. \u201CSafe\u201D means the plan still funds for life even with returns 2 points lower across all assets and both of you living to 100. Today's money; ignores any tax on a sale." });
               else
-                cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: <>About <b>{m(oo.safe)}</b> today, taken from your cash and investments and leaving pensions and property untouched — with the plan still funded for life <i>even if</i> returns run 2 points lower and you both live to 100. That would leave roughly {m(oo.leftover)} in accessible savings and a projected estate of about {m(oo.estateAfter)} at the end of the plan. Stretching further, the most you could spend before the plan would run short on current assumptions is {m(oo.max)} — but that keeps no margin for poor markets or a longer life.</>, note: "Funded only from cash and investments you've marked available for drawdown — pensions and property are deliberately excluded, as spending those involves tax, access and your legacy. Figures are in today's money and ignore any tax or penalty on a sale." });
+                cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: (<>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem 1.2rem", marginBottom: "0.35rem" }}>
+                    <div><div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.04em", opacity: 0.55, marginBottom: "0.1rem" }}>Stress-tested safe spend</div><div style={{ fontSize: "1.1rem", fontWeight: 700 }}>{m(oo.safe)}</div><div style={{ fontSize: "0.72rem", opacity: 0.6, marginTop: "0.1rem" }}>Plan still holds with returns 2% lower &amp; life to 100</div></div>
+                    <div><div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.04em", opacity: 0.55, marginBottom: "0.1rem" }}>Base-case maximum</div><div style={{ fontSize: "1.1rem", fontWeight: 700 }}>{m(oo.max)}</div><div style={{ fontSize: "0.72rem", opacity: 0.6, marginTop: "0.1rem" }}>Most before plan runs short on current assumptions — no margin</div></div>
+                  </div>
+                  <div style={{ fontSize: "0.75rem", opacity: 0.65 }}>Spending the safe amount would leave roughly {m(oo.leftover)} in accessible savings and a projected estate of {m(oo.estateAfter)} at plan end.</div>
+                </>), note: "Funded only from cash and investments you've marked available for drawdown — pensions and property are deliberately excluded. Stress-tested figure keeps margin for poor markets and a longer life. Base-case maximum uses current assumptions only, no buffer. Figures in today's money; ignores any tax on a sale." });
             }
 
             // MONTHLY
@@ -2672,7 +2678,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <tr><td>Largest one-off purchase today, from liquid assets (safe / maximum)</td><td className="r num">{goal.oneOff && goal.oneOff.liquidToday > 0 ? (goal.oneOff.safe > 0 ? `~${m(goal.oneOff.safe)} / ${m(goal.oneOff.max)}` : `none safely / ~${m(goal.oneOff.max)} max`) : "\u2014"}</td></tr>
                         <tr><td>Largest new permanent monthly cost, staying funded?</td><td className="r num">{goal.maxMonthly != null ? `~${sym}${Math.round(goal.maxMonthly).toLocaleString()}/mo` : "—"}</td></tr>
                         {!goal.to100 && goal.growth != null && <tr><td>Return uplift needed to fully fund the plan</td><td className="r num">+{goal.growth.toFixed(1)} pts on all assets</td></tr>}
-                        {goal.fundedNow && goal.inflMax != null && <tr><td>Inflation the plan can absorb before running short</td><td className="r num">{goal.inflCapped ? `well over ${(goal.baseInfl + goal.inflMax).toFixed(1)}%` : `up to ~${(goal.baseInfl + goal.inflMax).toFixed(1)}%/yr`}</td></tr>}
+                        {goal.fundedNow && goal.inflMax != null && <tr><td>Inflation the plan can absorb before running short</td><td className="r num">{goal.inflCapped ? `above ${(goal.baseInfl + goal.inflMax).toFixed(1)}% (test ceiling)` : `up to ~${(goal.baseInfl + goal.inflMax).toFixed(1)}%/yr`}</td></tr>}
                         {goal.propRelease && <tr><td>Releasing property ({m(goal.propRelease.propVal)})</td><td className="r num">{!goal.fundedNow ? (goal.propRelease.nowFunded ? "fully funds the plan" : goal.propRelease.depAge ? `extends to age ${goal.propRelease.depAge}` : "partial help") : `estate \u2192 ~${m(goal.propRelease.estate)}`}</td></tr>}
                         <tr><td>Projected estate at the end of the plan</td><td className="r num">{m(goal.estateEnd)} ({goal.estateEndYear})</td></tr>
                       </tbody>
