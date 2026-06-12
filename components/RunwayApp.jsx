@@ -123,8 +123,6 @@ const taxDefault = () => ({
 const TAX_PRESETS = {
   none: { personalAllowance: 0, bands: [] },
   uk: { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }] },
-  pt: { personalAllowance: 4462, bands: [{ upTo: 28400, rate: 25 }, { upTo: 83696, rate: 35 }, { upTo: "", rate: 48 }] }, // Portugal — simplified/indicative
-  flat20: { personalAllowance: 0, bands: [{ upTo: "", rate: 20 }] },
   blank: { personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] },
 };
 // Stress scenarios — each returns {yearOffset: growthDeltaPts}. Args: retirement year offset, plan end offset.
@@ -318,6 +316,15 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     if (chosen) return chosen.id;
     return (assets.find((a) => a.type === "cash") || assets.find((a) => a.type === "investment") || assets[0] || {}).id;
   };
+  // Where a given person's surplus accumulates: their own cash/investment first, then a joint pot, then the global default.
+  // This keeps each partner's saved surplus attributed to them, which matters on death (the pot transfers by its owner's rules).
+  const ownerDest = (o) => {
+    const own = (t) => assets.find((a) => a.type === t && (a.owner || "client1") === o);
+    const jnt = (t) => assets.find((a) => a.type === t && (a.owner || "client1") === "joint");
+    const a = own("cash") || own("investment") || jnt("cash") || jnt("investment");
+    return a ? a.id : surplusDest();
+  };
+  const bucketOf = (o) => (o === "client2" ? "client2" : o === "joint" ? "joint" : "client1");
 
   const rows = [];
   let prevAliveC1 = true, prevAliveC2 = true;
@@ -347,6 +354,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     // income for this year (pro-rated; death rules)
     let income = 0;
     const incomeBy = {};
+    const incByOwner = { client1: 0, client2: 0, joint: 0 };
     incomes.forEach((i) => {
       let v = flowForYear(i, y, ctx, inflDec) * frac;
       const o = i.owner || "client1";
@@ -356,17 +364,20 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       // CI claim: the affected person can no longer earn — stop their salary-like income (ends at retirement) from the claim year
       if (incomeStop && o === incomeStop.owner && y >= incomeStop.year && i.end && i.end.mode === "retirement") v = 0;
       incomeBy[i.id] = v;
+      incByOwner[bucketOf(o)] += v;
       income += v;
     });
 
     // expenditure for this year (pro-rated; death rules + survivor factor on joint)
     let expenditure = 0, expEssential = 0, expDiscretionary = 0, liabRepay = 0, premiums = 0;
+    const expByOwner = { client1: 0, client2: 0, joint: 0 };
     expenses.forEach((e) => {
       let v = flowForYear(e, y, ctx, inflDec) * frac;
       const o = e.owner || "joint";
       if (couple && (o === "client1" || o === "client2") && !ownerAlive(o)) v = 0;
       else if (couple && o === "joint" && firstDeath) v *= survFactor;
       expenditure += v;
+      expByOwner[bucketOf(o)] += v;
       if (e.priority === "discretionary") expDiscretionary += v; else expEssential += v;
     });
 
@@ -398,6 +409,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
 
     // contributions (pro-rated; stop if owner has died)
     let contribPersonal = 0;
+    const contribByOwner = { client1: 0, client2: 0, joint: 0 };
     assets.forEach((a) => {
       const c = a.contribution;
       const aliveOwner = couple ? ownerAlive(a.owner || "client1") : true;
@@ -409,7 +421,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
           // contribution funded separately). Grows the pot without reducing the year's free cash.
           // "cashflow" (default) reduces free cash, as before. Employer pension is always external.
           const fromCashflow = (c.funding || "cashflow") === "cashflow" && !(c.source === "employer" && a.type === "pension");
-          if (fromCashflow) contribPersonal += amt;
+          if (fromCashflow) { contribPersonal += amt; contribByOwner[bucketOf(a.owner || "client1")] += amt; }
         }
       }
     });
@@ -526,7 +538,28 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       // Spending is covered by income and/or the planned drawdown.
       // Reinvest only true income surplus; any planned drawdown beyond what spending needed is consumed.
       const reinvest = Math.max(0, incomeSurplus);
-      if (autoInvestSurplus && reinvest > 0) { const dest = surplusDest(); if (dest) bal[dest] += reinvest; }
+      if (autoInvestSurplus && reinvest > 0) {
+        // Attribute the household surplus to whoever generated it, so it lands in that person's own pot.
+        // Joint income/spend is split evenly between living partners. Weights only set the split — the
+        // total reinvested is unchanged; only which owner's pot receives it changes.
+        const explicit = assumptions.surplusDestId && assets.find((a) => a.id === assumptions.surplusDestId && (a.type === "cash" || a.type === "investment"));
+        if (explicit) {
+          bal[explicit.id] += reinvest; // adviser has chosen a specific destination — respect it
+        } else if (couple) {
+          const jShare = (b) => (aliveC1 && aliveC2 ? b / 2 : b); // if one has died, the survivor carries the joint flow
+          const net1 = incByOwner.client1 + (aliveC1 ? jShare(incByOwner.joint) : 0) - expByOwner.client1 - (aliveC1 ? jShare(expByOwner.joint) : 0) - contribByOwner.client1 - jShare(contribByOwner.joint);
+          const net2 = incByOwner.client2 + (aliveC2 ? jShare(incByOwner.joint) : 0) - expByOwner.client2 - (aliveC2 ? jShare(expByOwner.joint) : 0) - contribByOwner.client2 - jShare(contribByOwner.joint);
+          const w1 = aliveC1 ? Math.max(0, net1) : 0, w2 = aliveC2 ? Math.max(0, net2) : 0;
+          const tot = w1 + w2;
+          if (tot > 0) {
+            const d1 = ownerDest("client1"), d2 = ownerDest("client2");
+            if (w1 > 0 && d1) bal[d1] += reinvest * (w1 / tot);
+            if (w2 > 0 && d2) bal[d2] += reinvest * (w2 / tot);
+          } else { const dest = surplusDest(); if (dest) bal[dest] += reinvest; }
+        } else {
+          const dest = ownerDest("client1") || surplusDest(); if (dest) bal[dest] += reinvest;
+        }
+      }
     } else {
       // Even after the planned drawdown, spending isn't fully covered — auto-draw the remainder.
       let need = -(incomeSurplus + plannedDraw);
@@ -916,6 +949,30 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return { label, baseAge: ageOf(rows.find((r) => r.shortfall > 0)), stressAge: ageOf(stressRows.find((r) => r.shortfall > 0)) };
   }, [stressRows, rows, stress, ci, fn1, fn2]);
 
+  // Decompose the survivor-plan impact so the headline net-worth swing isn't misread as "the payout".
+  // The swing is cover + lower (survivor-rate) household spending − the deceased's lost earnings.
+  const survivorSummary = useMemo(() => {
+    if (!survivorOverlay || !stressRows) return null;
+    const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
+    const o = survivorOverlay.owner;
+    const sovProf = { ...effProfile, [o]: { ...effProfile[o], lifeExpectancy: survivorOverlay.deathAge } };
+    const cover = protection.filter((p) => (p.ptype || "life") !== "ci" && (p.insured || "client1") === o && (Number(p.coverToAge) || 0) > survivorOverlay.deathAge).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+    const noCoverRows = projectCashflow({ ...baseArgs, profile: sovProf, lumpSums: [] });
+    const realEnd = (rws) => { if (!rws.length) return 0; const last = rws[rws.length - 1]; const f = showReal ? Math.pow(1 + inflDec, last.y) : 1; return (last.total - (last.debt || 0)) / f; };
+    const baseEnd = realEnd(rows), withCoverEnd = realEnd(stressRows), noCoverEnd = realEnd(noCoverRows);
+    const survDep = stressRows.find((r) => r.shortfall > 0);
+    return {
+      cover,
+      coverEffect: withCoverEnd - noCoverEnd,   // the cover, grown to plan end
+      deathEffect: noCoverEnd - baseEnd,         // lost income net of lower survivor-rate spending
+      total: withCoverEnd - baseEnd,
+      survFundedAge: survDep ? (survDep.aliveC1 ? survDep.c1Age : survDep.c2Age) : null,
+      survName: o === "client2" ? fn1 : fn2,     // the person who survives is the OTHER partner
+      deathAge: survivorOverlay.deathAge,
+      diedName: o === "client2" ? fn2 : fn1,
+    };
+  }, [survivorOverlay, stressRows, rows, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, showReal, inflDec, fn1, fn2]);
+
   const markers = useMemo(() => {
     const retC1 = ectx.retC1 - ectx.age0c1;
     const retC2 = ectx.retC2 - ectx.age0c2;
@@ -1048,8 +1105,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Three states: no draw at all · one-off years only · sustained drawdown.
   const cashGap = useMemo(() => {
     const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
-    const drawRows = rows.map((r) => ({ ...r, draw: defl(r.coveredBySavings || 0, r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
-    const totalDrawn = rows.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0);
+    // The draw-from-savings amount isn't stored on the raw engine rows — derive it the same way the
+    // money-in/out chart does: spending (+ contributions) not met by income or planned drawdown, less any hard shortfall.
+    const drawOf = (r) => Math.max(0, (r.expenditure + (r.contrib || 0)) - r.income - (r.plannedDraw || 0) - (r.shortfall || 0));
+    const drawRows = rows.map((r) => ({ ...r, draw: defl(drawOf(r), r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
+    const totalDrawn = rows.reduce((s, r) => s + defl(drawOf(r), r.y), 0);
     const uncovered = rows.filter((r) => (r.shortfall || 0) > 0);
     const base = { uncoveredCount: uncovered.length, firstUncoveredYear: uncovered.length ? uncovered[0].year : null, totalDrawn };
     if (!drawRows.length) return { ...base, none: true, oneOffOnly: false };
@@ -1058,7 +1118,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (!sustained) return { ...base, none: false, oneOffOnly: true, isolatedYears: drawRows.map((r) => r.year), peakDraw: peak.draw, peakYear: peak.year };
     const first = sustained;
     const next5 = rows.filter((r) => r.year >= first.year && r.year < first.year + 5);
-    const avgDraw = next5.length ? next5.reduce((s, r) => s + defl(r.coveredBySavings || 0, r.y), 0) / next5.length : first.draw;
+    const avgDraw = next5.length ? next5.reduce((s, r) => s + defl(drawOf(r), r.y), 0) / next5.length : first.draw;
     return { ...base, none: false, oneOffOnly: false, firstYear: first.year, firstAge: first.c1Age, avgDraw, peakDraw: peak.draw, peakYear: peak.year };
   }, [rows, showReal, inflDec]);
 
@@ -1066,7 +1126,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Priority: short (red) > drawing (amber) > covered (green).
   const planPhases = useMemo(() => {
     if (!rows.length) return null;
-    const phaseOf = (r) => ((r.shortfall || 0) > 0 ? "short" : (r.coveredBySavings || 0) > 0 ? "draw" : "ok");
+    const phaseOf = (r) => ((r.shortfall || 0) > 0 ? "short" : (Math.max(0, (r.expenditure + (r.contrib || 0)) - r.income - (r.plannedDraw || 0) - (r.shortfall || 0))) > 0 ? "draw" : "ok");
     const segs = [];
     rows.forEach((r) => {
       const ph = phaseOf(r);
@@ -1126,17 +1186,26 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const projIncome = projInvestable * swr;
     const capitalGap = requiredCapital - projInvestable;
     const incomeGap = target - projIncome;
+    const invAssets = assets.filter((a) => a.type === "investment" || a.type === "pension");
+    const blended = invAssets.length ? invAssets.reduce((s, a) => s + (Number(a.growthRate) || 0), 0) / invAssets.length : (Number(assumptions.inflation) || 0) + 3;
+    const realRate = Math.max(0, (blended - (Number(assumptions.inflation) || 0)) / 100); // real terms (figures are today's money)
+    // Indicative longevity: drawing the target income from the projected pot, growing at the plan's blended real rate.
+    // Pure annuity-style depletion — a sanity figure, not the full engine (which also has other income).
+    let sustainable = false, yearsLast = null, depleteAge = null;
+    if (projInvestable > 0 && target > 0) {
+      if (target <= realRate * projInvestable + 1) sustainable = true;
+      else if (realRate <= 0) yearsLast = Math.floor(projInvestable / target);
+      else yearsLast = Math.floor(-Math.log(1 - (realRate * projInvestable) / target) / Math.log(1 + realRate));
+      if (yearsLast != null) depleteAge = ectx.retC1 + Math.max(0, yearsLast);
+    }
     // Monthly contribution (into a pot growing at the plan's blended return) to close the capital gap.
     let monthly = null;
     if (capitalGap > 0 && yearsToRet > 0) {
-      const invAssets = assets.filter((a) => a.type === "investment" || a.type === "pension");
-      const blended = invAssets.length ? invAssets.reduce((s, a) => s + (Number(a.growthRate) || 0), 0) / invAssets.length : (Number(assumptions.inflation) || 0) + 3;
-      const realRate = Math.max(0, (blended - (Number(assumptions.inflation) || 0)) / 100); // real terms (figures are today's money)
       const n = yearsToRet * 12, rM = realRate / 12;
       const fvFactor = rM > 0 ? (Math.pow(1 + rM, n) - 1) / rM : n;
       monthly = fvFactor > 0 ? capitalGap / fvFactor : null;
     }
-    return { target, swr: swr * 100, requiredCapital, projInvestable, projIncome, capitalGap, incomeGap, onTrack: capitalGap <= 0, yearsToRet, monthly };
+    return { target, swr: swr * 100, requiredCapital, projInvestable, projIncome, capitalGap, incomeGap, onTrack: capitalGap <= 0, yearsToRet, monthly, sustainable, yearsLast, depleteAge };
   }, [retGoal, rows, ectx, baseYear, assets, assumptions.inflation, inflDec]);
 
   // ---- Protection gap analysis ----------------------------------------------------------------
@@ -1455,13 +1524,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         <div className="tip-head"><b className="num">{d.year}</b> <span className="tip-yr">{agesLabel(d)}</span></div>
         <div className="tip-total"><span>Net worth{stressed ? " (current plan)" : ""}</span><b className="num">{fmtFull(d.total, cur)}</b></div>
         {stressed && <div className="tip-total tip-stress"><span>Under the scenario</span><b className="num">{fmtFull(d.sTotal, cur)}</b></div>}
-        {stressed && Math.abs(delta) >= 1 && <div className="tip-row tip-stress-delta"><span className="tip-name">Impact</span><span className="num">{delta < 0 ? "−" : "+"}{fmtFull(Math.abs(delta), cur)}</span></div>}
+        {stressed && Math.abs(delta) >= 1 && <div className="tip-row tip-stress-delta"><span className="tip-name">{survivorOverlay ? "vs both alive" : "Impact"}</span><span className="num">{delta < 0 ? "−" : "+"}{fmtFull(Math.abs(delta), cur)}</span></div>}
         <div className="tip-rule" />
         {stressed && <div className="tip-bd-label">Assets under the scenario</div>}
         {tooltipOrder.map((a) => <div className="tip-row" key={a.id}><span className="tip-name"><i style={{ background: colors[a.id] }} /> {a.name}</span><span className="num">{fmtFull(av(a), cur)}</span></div>)}
         {hasProperty && <div className="tip-row tip-sub"><span>Spendable (excl. property)</span><span className="num">{fmtFull(stressed ? d.sInvestable : d.investable, cur)}</span></div>}
         {(stressed ? d.sDebt : d.debt) > 0 && <div className="tip-row"><span className="tip-name">Less: debts</span><span className="num">−{fmtFull(stressed ? d.sDebt : d.debt, cur)}</span></div>}
         {(stressed ? d.sDebt : d.debt) > 0 && <div className="tip-total"><span>Net worth after debts</span><b className="num">{fmtFull(sNet, cur)}</b></div>}
+        {d.cmp != null && !stressed && <><div className="tip-rule" /><div className="tip-row"><span className="tip-name"><i style={{ background: "hsl(185 70% 42%)" }} /> {compareName || "Compared scenario"}</span><span className="num">{fmtFull(d.cmp, cur)}</span></div><div className="tip-row tip-cmp-delta"><span className="tip-name">vs this plan</span><span className="num">{(d.cmp - d.netWorth) >= 0 ? "+" : "−"}{fmtFull(Math.abs(d.cmp - d.netWorth), cur)}</span></div></>}
         {yearPayouts.length > 0 && <><div className="tip-rule" />{yearPayouts.map((e, i) => <div key={i} className="tip-row" style={{ color: t.green }}><span className="tip-name" style={{ color: t.green }}>↑ {e.label}</span><span className="num">received</span></div>)}</>}
         {d.taxPaid > 0 && <><div className="tip-rule" /><div className="tip-row"><span className="tip-name">Tax on withdrawals</span><span className="num">−{fmtFull(d.taxPaid, cur)}</span></div></>}
       </div>
@@ -1631,8 +1701,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           {!retGoalCalc.onTrack && <div className="goalp-row"><span>Capital gap</span><b className="num goalp-redfig">{fmtFull(retGoalCalc.capitalGap, cur)}</b></div>}
                           {!retGoalCalc.onTrack && retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <div className="goalp-row"><span>Extra saving to close it</span><b className="num goalp-redfig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></div>}
                           {!retGoalCalc.onTrack && retGoalCalc.yearsToRet === 0 && <div className="goalp-row"><span></span><span className="inl-note">Already at retirement — close the gap with additional capital or a lower income target.</span></div>}
+                          <div className="goalp-row"><span>Drawing {fmtFull(retGoalCalc.target, cur)}/yr, the pot alone</span><b className="num">{retGoalCalc.sustainable ? "is self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "—"}</b></div>
                         </div>
-                        <span className="field-note">Today's money. "Investable capital" excludes property. Extra saving assumes the plan's blended real return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
+                        <span className="field-note">Today's money. "Investable capital" excludes property. The longevity line draws the target income from the projected pot alone (growing at the plan's blended real return) — other income sources aren't counted, so it's a deliberately conservative sanity check. Extra saving assumes the same return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
                       </div>
                     )}
                   </>)}
@@ -1660,7 +1731,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                             : <span className="tax-from">from {couple ? `${fn1}'s age` : "age"} <NumberInput className="tax-age" value={p.startAge} onCommit={(v) => upPeriod(p.id, { startAge: v })} /> <em className="tax-yr">≈ {baseYear + Math.max(0, Math.round((Number(p.startAge) || 0) - ectx.age0c1))}</em></span>}
                           {tax.periods.length > 1 && <button className="rec-del" onClick={() => rmPeriod(p.id)}><Trash2 size={14} /></button>}
                         </div>
-                        <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax (UAE/Gulf)</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "pt")}>Portugal*</button><button onClick={() => applyPreset(p.id, "flat20")}>Flat 20%</button><button onClick={() => applyPreset(p.id, "blank")}>Blank</button></div>
+                        <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax (UAE/Gulf)</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "blank")}>Custom (blank)</button></div>
                         <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
                         <div className="tax-bands">
                           <div className="tax-bands-head"><span>Income up to</span><span>Rate</span><span /></div>
@@ -1957,6 +2028,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               {showComposition && legendTypes.map((ty) => <span key={ty}><i style={{ background: typeSwatch(ty) }} /> {TYPE_LABEL[ty]}</span>)}
               {hasProperty && <span><i className="line-key dash" style={{ borderTopColor: t.line }} /> Spendable (excl. property)</span>}
               {hasDebt && showComposition && <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Net worth after debts</span>}
+              {(stress || ci || survivorOverlay) && <span><i className="line-key dash" style={{ borderTopColor: t.ink, opacity: 0.55 }} /> Current plan (for comparison)</span>}
+              {compareMap && <span><i className="line-key" style={{ borderTopColor: "hsl(185 70% 42%)" }} /> {compareName || "Compared scenario"}</span>}
             </div>
             {(eventList.length > 0 || annotations.length > 0 || !present) && (
               <div className="chart-events">
@@ -1975,6 +2048,21 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <button className="wi-reset" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear</button>
               </div>
             )}
+            {survivorOverlay && survivorSummary && (() => {
+              const s = survivorSummary; const sgn = (v) => (v >= 0 ? "+" : "−");
+              return (
+                <div className="stress-bar stress-bar-surv">
+                  <span className="stress-tag"><AlertTriangle size={12} /> {s.diedName} dies age {s.deathAge}</span>
+                  <span className="stress-impact">
+                    {s.survFundedAge ? <b>{s.survName}'s plan runs short at {s.survFundedAge}</b> : <b>{s.survName}'s plan stays funded for life</b>}
+                    {" · "}net worth at plan end {sgn(s.total)}{fmtFull(Math.abs(s.total), cur)} vs both alive
+                    {s.cover > 0 ? ` — cover ${sgn(s.coverEffect)}${fmtFull(Math.abs(s.coverEffect), cur)}` : " — no cover pays out"}
+                    {`, lower survivor spending less lost earnings ${sgn(s.deathEffect)}${fmtFull(Math.abs(s.deathEffect), cur)}`}
+                  </span>
+                  <button className="wi-reset" onClick={() => setSurvivorOverlay(null)}>Clear</button>
+                </div>
+              );
+            })()}
             {!present && (
               <div className={`whatif ${whatIfActive ? "active" : ""}`}>
                 <div className="whatif-head">
@@ -2008,7 +2096,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
                   {hasProperty && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sInvestable" : "investable"} stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
-                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.mid} strokeWidth={1.7} strokeDasharray="5 4" dot={false} isAnimationActive={false} />}
+                  {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.6} strokeDasharray="9 5" strokeOpacity={0.55} dot={false} isAnimationActive={false} />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 70% 42%)" strokeWidth={2.5} dot={{ r: 2, fill: "hsl(185 70% 42%)", strokeWidth: 0 }} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
@@ -2600,6 +2688,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                             ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
                             : <><tr><td>Capital gap</td><td className="r num"><b className="rep-gap-fig">{m(retGoalCalc.capitalGap)}</b></td></tr>
                                {retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <tr><td>Additional saving to close the gap</td><td className="r num"><b className="rep-gap-fig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></td></tr>}</>}
+                          <tr><td>Pot alone, drawing {m(retGoalCalc.target)}/yr</td><td className="r num">{retGoalCalc.sustainable ? "self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "\u2014"}</td></tr>
                         </tbody>
                       </table>
                       <p className="rep-p rep-small">Figures in today's money; investable capital excludes property. The required capital applies the stated withdrawal rate as a rule of thumb — it is a planning illustration, not a recommendation or a guarantee of sustainable income.</p>
@@ -2776,7 +2865,7 @@ const CSS = `
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{display:grid;grid-template-columns:204px 360px 1fr;flex:1;min-height:0;}
+.app{display:grid;grid-template-columns:204px 360px 1fr;grid-template-rows:minmax(0,1fr);flex:1;min-height:0;}
 .app.present{grid-template-columns:1fr;}
 
 .rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;}
@@ -3047,6 +3136,10 @@ const CSS = `
 .goal-btn:hover{background:var(--accent);color:#fff;}
 .goal-btn.on{background:var(--red);border-color:var(--red);color:#fff;}
 .stress-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;padding:8px 12px;border:1px solid var(--red);border-radius:9px;background:color-mix(in srgb, var(--red) 8%, transparent);}
+.stress-bar-surv{border-color:var(--border-strong);background:color-mix(in srgb, var(--ink) 5%, transparent);}
+.stress-bar-surv .stress-tag{color:var(--ink);}
+.tip-cmp-delta{color:hsl(185 60% 38%);font-weight:600;}
+.tip-cmp-delta .num{color:hsl(185 60% 38%);}
 .stress-tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--red);}
 .stress-impact{font-size:12px;color:var(--mid);}
 .stress-bar .wi-reset{margin-left:auto;}
