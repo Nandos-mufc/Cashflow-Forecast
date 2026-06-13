@@ -412,16 +412,18 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     const contribByOwner = { client1: 0, client2: 0, joint: 0 };
     assets.forEach((a) => {
       const c = a.contribution;
-      const aliveOwner = couple ? ownerAlive(a.owner || "client1") : true;
+      // "contributor" is who funds the contribution (defaults to the asset's owner).
+      // On a joint asset, each partner may fund a separate contribution — when one dies,
+      // only their share should stop. This lets you model "Partner A contributes £65k,
+      // Partner B contributes £20k to the same joint pot" with correct survivor behaviour.
+      const contributor = c && c.contributor ? c.contributor : (a.owner || "client1");
+      const aliveOwner = couple ? ownerAlive(contributor) : true;
       if (c && c.enabled && aliveOwner) {
         const amt = flowForYear(c, y, ctx, inflDec) * frac;
         if (amt > 0) {
           bal[a.id] += amt;
-          // "external" funding = money from outside the modelled cashflow (illustrative growth, or a
-          // contribution funded separately). Grows the pot without reducing the year's free cash.
-          // "cashflow" (default) reduces free cash, as before. Employer pension is always external.
           const fromCashflow = (c.funding || "cashflow") === "cashflow" && !(c.source === "employer" && a.type === "pension");
-          if (fromCashflow) { contribPersonal += amt; contribByOwner[bucketOf(a.owner || "client1")] += amt; }
+          if (fromCashflow) { contribPersonal += amt; contribByOwner[bucketOf(contributor)] += amt; }
         }
       }
     });
@@ -593,7 +595,7 @@ const fmtFull = (v, cur) =>
   new Intl.NumberFormat("en-GB", { style: "currency", currency: cur, maximumFractionDigits: 0 }).format(Math.round(v));
 const fmtCompact = (v, cur) =>
   new Intl.NumberFormat("en-GB", { style: "currency", currency: cur, notation: "compact", maximumFractionDigits: 1 }).format(v);
-const firstName = (n, fb) => { const s = (n || "").trim().split(/\s+/)[0]; return s || fb; };
+const firstName = (n, fb) => { const s = (n || "").trim(); return s || fb; };
 
 const TYPE_HUE = {
   cash: { h: 198, s: 14, l: 68 },
@@ -785,7 +787,7 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
 /* ================================================================== */
 /*  APP                                                               */
 /* ================================================================== */
-export default function RunwayApp({ initialData = null, onChange = null, scenarios = null, activeScenarioId = null, compareScenarioId = null, compareName = null, compareData = null, onScenarioAction = null }) {
+export default function RunwayApp({ initialData = null, onChange = null, scenarios = null, activeScenarioId = null, compareScenarioId = null, compareName = null, compareData = null, onScenarioAction = null, firmSettings = null, onFirmSettingsChange = null }) {
   const seed = initialData || SEED;
   const [theme, setTheme] = useState("light");
   const [present, setPresent] = useState(false);
@@ -1065,9 +1067,23 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   const eventList = useMemo(() => {
     const ev = [];
-    if (markers.retC1) ev.push({ label: couple ? `${fn1} retires` : "Retirement", year: markers.retC1, color: t.ink });
-    if (markers.retC2) ev.push({ label: `${fn2} retires`, year: markers.retC2, color: t.ink });
-    if (markers.firstDeath) ev.push({ label: "First death", year: markers.firstDeath, color: t.mid });
+    if (markers.retC1) {
+      // Suppress the deceased partner's retirement marker when survivor overlay is active
+      const c1IsDead = survivorOverlay && survivorOverlay.owner === "client1";
+      if (!c1IsDead) ev.push({ label: couple ? `${fn1} retires` : "Retirement", year: markers.retC1, color: t.ink });
+    }
+    if (markers.retC2) {
+      const c2IsDead = survivorOverlay && survivorOverlay.owner === "client2";
+      if (!c2IsDead) ev.push({ label: `${fn2} retires`, year: markers.retC2, color: t.ink });
+    }
+    // First death marker: use the survivor overlay death year if active (red), else base plan's projected first death (grey)
+    if (survivorOverlay) {
+      const diedName = survivorOverlay.owner === "client2" ? fn2 : fn1;
+      const deathYear = baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1));
+      ev.push({ label: `${diedName} dies age ${survivorOverlay.deathAge}`, year: deathYear, color: t.red, isSurvivorDeath: true });
+    } else if (markers.firstDeath) {
+      ev.push({ label: "First death", year: markers.firstDeath, color: t.mid });
+    }
     if (kpis.depYear) ev.push({ label: "Funds run short", year: kpis.depYear, color: t.red });
     return ev;
   }, [markers, kpis.depYear, couple, fn1, fn2, t]);
@@ -1128,39 +1144,52 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   // Cash gap analysis — base plan (ignores any active stress overlay), in the report's money basis.
   // Three states: no draw at all · one-off years only · sustained drawdown.
-  const cashGap = useMemo(() => {
-    const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
-    // The draw-from-savings amount isn't stored on the raw engine rows — derive it the same way the
-    // money-in/out chart does: spending (+ contributions) not met by income or planned drawdown, less any hard shortfall.
+  // The rows to use for cash gap and plan phases — follows the active scenario when one is live,
+  // so the gap panel updates to reflect stress/CI/survivor overlays rather than staying frozen on the base plan.
+  const activeRows = (stress || ci || survivorOverlay) && stressRows ? stressRows : rows;
+
+  const computeCashGap = (srcRows, defl) => {
     const drawOf = (r) => Math.max(0, (r.expenditure + (r.contrib || 0)) - r.income - (r.plannedDraw || 0) - (r.shortfall || 0));
-    const drawRows = rows.map((r) => ({ ...r, draw: defl(drawOf(r), r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
-    const totalDrawn = rows.reduce((s, r) => s + defl(drawOf(r), r.y), 0);
-    const uncovered = rows.filter((r) => (r.shortfall || 0) > 0);
+    const drawRows = srcRows.map((r) => ({ ...r, draw: defl(r.draw !== undefined ? r.draw : drawOf(r), r.y), short: defl(r.shortfall || 0, r.y) })).filter((r) => r.draw > 0 || r.short > 0);
+    const totalDrawn = srcRows.reduce((s, r) => s + defl(drawOf(r), r.y), 0);
+    const uncovered = srcRows.filter((r) => (r.shortfall || 0) > 0);
     const base = { uncoveredCount: uncovered.length, firstUncoveredYear: uncovered.length ? uncovered[0].year : null, totalDrawn };
     if (!drawRows.length) return { ...base, none: true, oneOffOnly: false };
     let peak = drawRows[0]; drawRows.forEach((r) => { if (r.draw > peak.draw) peak = r; });
     const sustained = drawRows.find((r, i) => drawRows[i + 1] && drawRows[i + 1].year === r.year + 1);
     if (!sustained) return { ...base, none: false, oneOffOnly: true, isolatedYears: drawRows.map((r) => r.year), peakDraw: peak.draw, peakYear: peak.year };
     const first = sustained;
-    const next5 = rows.filter((r) => r.year >= first.year && r.year < first.year + 5);
+    const next5 = srcRows.filter((r) => r.year >= first.year && r.year < first.year + 5);
     const avgDraw = next5.length ? next5.reduce((s, r) => s + defl(drawOf(r), r.y), 0) / next5.length : first.draw;
     return { ...base, none: false, oneOffOnly: false, firstYear: first.year, firstAge: first.c1Age, avgDraw, peakDraw: peak.draw, peakYear: peak.year };
+  };
+
+  const cashGap = useMemo(() => {
+    const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+    return computeCashGap(activeRows, defl);
+  }, [activeRows, showReal, inflDec]);
+
+  // Report always shows base-plan cash gap regardless of active scenario, since the report has its own stress page.
+  const reportCashGap = useMemo(() => {
+    const defl = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+    return computeCashGap(rows, defl);
   }, [rows, showReal, inflDec]);
 
-  // Plan phases — classifies every year of the base plan for the cash gap timeline strip.
+  // Plan phases — classifies every year for the cash gap timeline strip.
   // Priority: short (red) > drawing (amber) > covered (green).
+  // Follows the active scenario when one is live.
   const planPhases = useMemo(() => {
-    if (!rows.length) return null;
+    if (!activeRows.length) return null;
     const phaseOf = (r) => ((r.shortfall || 0) > 0 ? "short" : (Math.max(0, (r.expenditure + (r.contrib || 0)) - r.income - (r.plannedDraw || 0) - (r.shortfall || 0))) > 0 ? "draw" : "ok");
     const segs = [];
-    rows.forEach((r) => {
+    activeRows.forEach((r) => {
       const ph = phaseOf(r);
       const last = segs[segs.length - 1];
       if (last && last.phase === ph) { last.toYear = r.year; last.toAge = r.c1Age; last.n += 1; }
       else segs.push({ phase: ph, fromYear: r.year, toYear: r.year, fromAge: r.c1Age, toAge: r.c1Age, n: 1 });
     });
-    return { segs, total: rows.length };
-  }, [rows]);
+    return { segs, total: activeRows.length };
+  }, [activeRows]);
 
   // Lifetime tax — total illustrative tax paid over the whole plan, in the current money basis.
   const lifetimeTax = useMemo(() => rows.reduce((s, r) => s + (showReal ? (r.taxPaid || 0) / Math.pow(1 + inflDec, r.y) : (r.taxPaid || 0)), 0), [rows, showReal, inflDec]);
@@ -1237,12 +1266,26 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Two layers: (1) rule-of-thumb benchmarks (house multipliers × current income), and
   // (2) the engine-driven survivor test — simulate death at a chosen age and solve for the
   // additional lump sum at death that keeps the survivor's plan funded. Observational output only.
+  // Benchmark multipliers are a FIRM-LEVEL setting. When the host passes firmSettings (from Supabase),
+  // that's the source of truth and changes flow up via onFirmSettingsChange so every adviser shares them.
+  // Without a host (standalone/preview), it falls back to device localStorage so the feature still works.
+  // CONTRACT: onFirmSettingsChange receives a PARTIAL patch (e.g. { protMult } or { riskRates }). The host
+  // must MERGE it into the stored firm_settings row, not replace the whole row — otherwise updating one
+  // setting would wipe the others.
   const PROT_MULT_KEY = "runway_prot_mult";
   const [protMult, setProtMult] = useState(() => {
+    if (firmSettings && firmSettings.protMult) return { life: 10, ci: 3, ...firmSettings.protMult };
     if (typeof window === "undefined") return { life: 10, ci: 3 };
     try { return { life: 10, ci: 3, ...(JSON.parse(localStorage.getItem(PROT_MULT_KEY) || "{}") || {}) }; } catch { return { life: 10, ci: 3 }; }
   });
-  const upProtMult = (patch) => setProtMult((m0) => { const n = { ...m0, ...patch }; try { localStorage.setItem(PROT_MULT_KEY, JSON.stringify(n)); } catch {} return n; });
+  // Keep in sync if the host pushes updated firm settings (e.g. another adviser changed them).
+  useEffect(() => { if (firmSettings && firmSettings.protMult) setProtMult((m0) => ({ ...m0, ...firmSettings.protMult })); }, [firmSettings]);
+  const upProtMult = (patch) => setProtMult((m0) => {
+    const n = { ...m0, ...patch };
+    if (onFirmSettingsChange) onFirmSettingsChange({ protMult: n });
+    else { try { localStorage.setItem(PROT_MULT_KEY, JSON.stringify(n)); } catch {} }
+    return n;
+  });
   const [deathAges, setDeathAges] = useState({ client1: null, client2: null }); // null = default (current age + 1)
   const protGap = useMemo(() => {
     if (section !== "protection" && !reportOpen) return null;
@@ -1312,11 +1355,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     } else {
       paras.push(`Based on the assumptions in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The figures below show the scale of the gap and the levers that influence it.`);
     }
-    if (cashGap && !cashGap.none && !cashGap.oneOffOnly) {
-      paras.push(`Income currently ${surplus0 >= 0 ? `exceeds spending by about ${m(surplus0)} a year` : `falls short of spending by about ${m(-surplus0)} a year`}. From ${cashGap.firstYear}, spending begins to exceed income on a sustained basis and roughly ${m(cashGap.avgDraw)} a year is drawn from savings and investments, peaking at ${m(cashGap.peakDraw)} in ${cashGap.peakYear}.`);
-    } else if (cashGap && cashGap.oneOffOnly) {
-      paras.push(`Income covers regular spending in every year of the plan. Savings are drawn on only for one-off costs (${cashGap.isolatedYears.join(", ")}), the largest being ${m(cashGap.peakDraw)} in ${cashGap.peakYear}.`);
-    } else if (cashGap && cashGap.none) {
+    if (reportCashGap && !reportCashGap.none && !reportCashGap.oneOffOnly) {
+      paras.push(`Income currently ${surplus0 >= 0 ? `exceeds spending by about ${m(surplus0)} a year` : `falls short of spending by about ${m(-surplus0)} a year`}. From ${reportCashGap.firstYear}, spending begins to exceed income on a sustained basis and roughly ${m(reportCashGap.avgDraw)} a year is drawn from savings and investments, peaking at ${m(reportCashGap.peakDraw)} in ${reportCashGap.peakYear}.`);
+    } else if (reportCashGap && reportCashGap.oneOffOnly) {
+      paras.push(`Income covers regular spending in every year of the plan. Savings are drawn on only for one-off costs (${reportCashGap.isolatedYears.join(", ")}), the largest being ${m(reportCashGap.peakDraw)} in ${reportCashGap.peakYear}.`);
+    } else if (reportCashGap && reportCashGap.none) {
       paras.push(`Income covers spending in every year of the plan — savings are never drawn upon under the current assumptions.`);
     }
     // Strengths
@@ -1339,7 +1382,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (couple && protSnap && protSnap.firstDeath && protSnap.firstDeath.payout === 0 && protection.length) watch.push(`the cover recorded does not extend to the first death in ${protSnap.firstDeath.year} (terms end earlier)`);
     if (protGap) protGap.bench.forEach((b) => { const nm = b.k === "client2" ? n2 : n1; if (b.inc > 0 && b.lifeGap > 0) watch.push(`life cover for ${nm} is ${m(b.lifeGap)} below the ${protMult.life}× income benchmark`); if (b.inc > 0 && b.ciGap > 0 && b.ciHave === 0) watch.push(`no critical-illness cover is recorded for ${nm} (benchmark ${m(b.ciNeed)})`); });
     if (protGap && protGap.survivor) protGap.survivor.forEach((sv) => { const nm = sv.k === "client2" ? n2 : n1; if (!sv.funded && sv.closeGap != null) watch.push(`if ${nm} died at age ${sv.dAge}, the survivor's plan runs short — additional cover of ${sv.closeGap === Infinity ? "over " + m(20000000) : "~" + m(Math.ceil(sv.closeGap / 10000) * 10000)} would close the gap`); });
-    if (cashGap && !cashGap.none && cashGap.uncoveredCount > 0) watch.push(`${cashGap.uncoveredCount} year${cashGap.uncoveredCount === 1 ? "" : "s"} show spending that cannot be met from income or savings, starting ${cashGap.firstUncoveredYear}`);
+    if (reportCashGap && !reportCashGap.none && reportCashGap.uncoveredCount > 0) watch.push(`${reportCashGap.uncoveredCount} year${reportCashGap.uncoveredCount === 1 ? "" : "s"} show spending that cannot be met from income or savings, starting ${reportCashGap.firstUncoveredYear}`);
     const incOwners = new Set(incomes.filter((i) => (Number(i.amount) || 0) > 0).map((i) => i.owner || "client1"));
     if (couple && incOwners.size === 1 && incomes.length > 0) watch.push(`all recorded income belongs to ${incOwners.has("client2") ? n2 : n1}`);
     if (watch.length) paras.push("Watch points: " + watch.join("; ") + ".");
@@ -1353,7 +1396,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     }
     paras.push(`All figures are ${showReal ? "in today's money (adjusted for inflation)" : "in future money (not adjusted for inflation)"} and reflect the assumptions listed in this report.${stressActive ? " The figures above describe the base plan; the stress scenario is illustrated on its own page." : ""} This commentary describes the projection — it is not a recommendation.`);
     return paras.join("\n\n");
-  }, [reportOpen, reportCfg.anonymous, rows, kpis, cashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive, stressImpact, lifetimeTax]);
+  }, [reportOpen, reportCfg.anonymous, rows, kpis, reportCashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive, stressImpact, lifetimeTax]);
   const commentaryText = commentaryEdit ?? generatedCommentary;
 
   const goal = useMemo(() => {
@@ -1362,6 +1405,16 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
     const curSpend = expenses.reduce((s, e) => { const a = Number(e.amount) || 0; if (e.frequency === "monthly") return s + a * 12; if (e.frequency === "annual") return s + a; return s; }, 0); // recurring annual spend (excludes one-offs)
+    // Real-terms estate (net worth) at plan end for any scenario input — used to express the "margin of
+    // safety" behind a solver answer. Two plans that both "retire at 50" can leave very different estates;
+    // surfacing that estate restores the differentiation that a pass/fail threshold throws away.
+    const baseInflPct = Number(assumptions.inflation) || 0;
+    const estateAtEnd = (inp) => {
+      const rr = projectCashflow(inp);
+      if (!rr.length) return 0;
+      const ly = rr.length - 1;
+      return Math.max(0, (rr[ly].total - (rr[ly].debt || 0))) / Math.pow(1 + baseInflPct / 100, ly);
+    };
 
     // Growth: percentage points added to every asset's assumed return (monotonic — more is better)
     const gTest = (g) => funded({ ...base, assets: assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) + g })) });
@@ -1379,6 +1432,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (fundedNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTest(d - 1)) d--; retire = d; }
     else { let d = 1; while (d <= 25 && !rTest(d)) d++; retire = d <= 25 ? d : null; }
     const earliestRetAge = retire != null ? ret1Base + retire : null;
+    // Margin behind the retirement answer: the estate left at plan end if they retire at the earliest age.
+    let retireMargin = null;
+    if (fundedNow && retire != null) {
+      retireMargin = estateAtEnd({ ...base, profile: { ...profile, client1: { ...profile.client1, retirementAge: ret1Base + retire }, client2: { ...profile.client2, retirementAge: (Number(profile.client2.retirementAge) || 0) + retire } } });
+    }
 
     // Spending: multiplier on every expense (monotonic — more is worse)
     const sTest = (f) => funded({ ...base, expenses: expenses.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })) });
@@ -1443,7 +1501,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       propRelease = { propVal, nowFunded: !rDep, depAge, estate: rEstate };
     }
 
-    return { fundedNow, growth, growthCapped, retire, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
+    return { fundedNow, growth, growthCapped, retire, retireMargin, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
   }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
@@ -1486,17 +1544,21 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   // ---- Risk profiles (per client) -------------------------------------------------------------
   // Selecting a profile applies its per-type growth rates to the assets that person owns.
-  // Template rates are firm-configurable: overrides persist in localStorage (device-level house
-  // assumptions), merged over the shipped defaults. Apply + drift both use the effective rates.
+  // Risk template rates are a FIRM-LEVEL setting (the house view of what "Balanced" etc. returns).
+  // firmSettings is the source of truth when present (Supabase via the host), localStorage otherwise.
+  // Apply + drift both use the effective rates (shipped defaults merged with any overrides).
   const RISK_RATES_KEY = "runway_risk_rates";
   const [riskRateOverrides, setRiskRateOverrides] = useState(() => {
+    if (firmSettings && firmSettings.riskRates) return firmSettings.riskRates;
     if (typeof window === "undefined") return {};
     try { return JSON.parse(localStorage.getItem(RISK_RATES_KEY) || "{}") || {}; } catch { return {}; }
   });
+  useEffect(() => { if (firmSettings && firmSettings.riskRates) setRiskRateOverrides(firmSettings.riskRates); }, [firmSettings]);
   const [riskEditOpen, setRiskEditOpen] = useState(false);
   const getRiskRates = (id) => { const p = riskProfileById(id); return p ? { ...p.rates, ...(riskRateOverrides[id] || {}) } : null; };
-  const setRiskRate = (id, type, v) => setRiskRateOverrides((o) => { const n = { ...o, [id]: { ...(o[id] || {}), [type]: Number(v) } }; try { localStorage.setItem(RISK_RATES_KEY, JSON.stringify(n)); } catch {} return n; });
-  const resetRiskRates = () => { setRiskRateOverrides({}); try { localStorage.removeItem(RISK_RATES_KEY); } catch {} };
+  const persistRiskRates = (n) => { if (onFirmSettingsChange) onFirmSettingsChange({ riskRates: n }); else { try { localStorage.setItem(RISK_RATES_KEY, JSON.stringify(n)); } catch {} } };
+  const setRiskRate = (id, type, v) => setRiskRateOverrides((o) => { const n = { ...o, [id]: { ...(o[id] || {}), [type]: Number(v) } }; persistRiskRates(n); return n; });
+  const resetRiskRates = () => { setRiskRateOverrides({}); if (onFirmSettingsChange) onFirmSettingsChange({ riskRates: {} }); else { try { localStorage.removeItem(RISK_RATES_KEY); } catch {} } };
   const riskRatesCustomised = Object.keys(riskRateOverrides).length > 0;
   const riskProfiles = assumptions.riskProfiles || {};
   const applyRiskProfile = (ownerKey, profileId) => {
@@ -1709,7 +1771,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           {["cash", "investment", "pension", "property"].map((ty) => <Mini key={ty} value={r[ty]} step={0.1} suffix="%" onChange={(v) => setRiskRate(p.id, ty, v)} />)}
                         </div>
                       ); })}
-                      <span className="field-note">Your house assumptions — saved on this device and used whenever a profile is applied. Changing a rate here doesn't alter existing plans until a profile is re-applied.</span>
+                      <span className="field-note">Your house assumptions — {onFirmSettingsChange ? "shared across your firm" : "saved on this device"} and used whenever a profile is applied. Changing a rate here doesn't alter existing plans until a profile is re-applied.</span>
                     </div>
                   )}
                 </div>
@@ -1842,6 +1904,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                               )}
                               {a.type === "pension" && <div className="rec-field"><label>Source <InfoTip text="Personal contributions are paid from cashflow, so they reduce the surplus available each year. Employer contributions are added straight to the pot and don't affect the client's cashflow." /></label><Seg value={a.contribution.source} onChange={(v) => upContrib(a.id, { source: v })} options={[{ value: "personal", label: "Personal" }, { value: "employer", label: "Employer" }]} /><span className="inl-note">{a.contribution.source === "employer" ? "added to pot, doesn't reduce cashflow" : "funded from surplus"}</span></div>}
                               <div className="rec-field"><label>Funded from <InfoTip text="Cashflow: the contribution is paid out of this plan's income, so it reduces the surplus each year — and if there isn't enough income, it's drawn from savings. Standalone: the money is assumed to come from outside the modelled cashflow, so the pot simply grows by the contribution with no withdrawal. Use Standalone to illustrate an investment's growth in isolation, without entering income and expenditure." /></label><Seg value={a.contribution.funding || "cashflow"} onChange={(v) => upContrib(a.id, { funding: v })} options={[{ value: "cashflow", label: "Cashflow" }, { value: "external", label: "Standalone" }]} /><span className="inl-note">{(a.contribution.funding || "cashflow") === "external" ? "illustrative — grows the pot, ignores cashflow" : "reduces this year's surplus"}</span></div>
+                              {couple && (a.contribution.funding || "cashflow") === "cashflow" && !(a.contribution.source === "employer" && a.type === "pension") && (
+                                <div className="rec-field"><label>Paid by <InfoTip text="Who funds this contribution. When that person dies or their income stops, this contribution stops — even if the pot itself is joint. To model two partners contributing different amounts to the same pot, set Partner A's contribution here and add a second asset of the same type for Partner B's share, or split the pot in two. One contribution entry = one contributor." /></label><Pick value={a.contribution.contributor || a.owner || "client1"} onChange={(v) => upContrib(a.id, { contributor: v })} options={ownerOpts} /><span className="inl-note">{a.contribution.contributor && a.contribution.contributor !== (a.owner || "client1") ? "stops when this person's income stops or they die" : "defaults to the asset owner"}</span></div>
+                              )}
                             </>)}
                           </div>
                           {a.type !== "property" && (
@@ -1984,7 +2049,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       </div>
                     ))}
                     <div className="pg-mult">
-                      <span className="field-note">Benchmark multipliers (house assumptions, saved on this device):</span>
+                      <span className="field-note">Benchmark multipliers (house assumptions, {onFirmSettingsChange ? "shared across your firm" : "saved on this device"}):</span>
                       <div className="pg-mult-row"><label>Life ×</label><Mini value={protMult.life} step={1} onChange={(v) => upProtMult({ life: v })} /><label>CI ×</label><Mini value={protMult.ci} step={1} onChange={(v) => upProtMult({ ci: v })} /></div>
                     </div>
 
@@ -2095,15 +2160,15 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               </div>
             )}
             {survivorOverlay && survivorSummary && (() => {
-              const s = survivorSummary; const sgn = (v) => (v >= 0 ? "+" : "−");
+              const s = survivorSummary;
               return (
                 <div className="stress-bar stress-bar-surv">
                   <span className="stress-tag"><AlertTriangle size={12} /> {s.diedName} dies age {s.deathAge}</span>
                   <span className="stress-impact">
                     {s.survFundedAge ? <b>{s.survName}'s plan runs short at {s.survFundedAge}</b> : <b>{s.survName}'s plan stays funded for life</b>}
-                    {" · "}net worth at plan end {sgn(s.total)}{fmtFull(Math.abs(s.total), cur)} vs both alive
-                    {s.cover > 0 ? ` — cover ${sgn(s.coverEffect)}${fmtFull(Math.abs(s.coverEffect), cur)}` : " — no cover pays out"}
-                    {`, lower survivor spending less lost earnings ${sgn(s.deathEffect)}${fmtFull(Math.abs(s.deathEffect), cur)}`}
+                    {" · "}net worth at plan end {s.total >= 0 ? `+${fmtFull(s.total, cur)} vs both alive` : `${fmtFull(Math.abs(s.total), cur)} less than if both survived`}
+                    {s.cover > 0 ? ` — cover adds ${fmtFull(Math.abs(s.coverEffect), cur)}` : " — no cover pays out"}
+                    {`, lower survivor spending less lost earnings ${s.deathEffect >= 0 ? "+" : "−"}${fmtFull(Math.abs(s.deathEffect), cur)}`}
                   </span>
                   <button className="wi-reset" onClick={() => setSurvivorOverlay(null)}>Clear</button>
                 </div>
@@ -2132,9 +2197,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} position={{ y: 10 }} />
 
-                  {markers.retC1 && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {survivorOverlay
+                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />
+                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {kpis.depYear && <ReferenceLine x={kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
                   {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
                   {showComposition
@@ -2167,8 +2234,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <XAxis dataKey="year" tick={tick} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} />
-                  {markers.retC1 && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {markers.retC2 && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {survivorOverlay && <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />}
                   <Tooltip content={<FlowTip />} cursor={{ fill: t.grid }} position={{ y: 10 }} />
                   {incomes.map((i) => <Bar key={i.id} dataKey={iKey(i.id)} stackId="mio" fill={incColors[i.id]} fillOpacity={0.9} isAnimationActive={false} />)}
                   {hasPlannedDraw && <Bar dataKey="plannedDraw" stackId="mio" fill={DRAWDOWN_COLOR} fillOpacity={0.92} isAnimationActive={false} />}
@@ -2186,7 +2254,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             <div className="gap-card">
               <div className="gap-head">
                 <span className="gap-title">Cash gap <InfoTip text="Your plan in phases. Green: income covers spending. Amber: spending exceeds income and the difference is drawn from savings — normal in retirement; the question is whether the pots last. Red: the gap can no longer be met from income or accessible savings." /></span>
-                <span className="gap-sub">{stress || ci || survivorOverlay ? "base plan — scenario shown on the charts above" : showReal ? "today's money" : "future money"}</span>
+                <span className="gap-sub">{stress || ci || survivorOverlay
+                  ? survivorOverlay
+                    ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}`
+                    : ci
+                      ? `CI scenario — ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}`
+                      : stressImpact ? stressImpact.label : "stress scenario"
+                  : showReal ? "today's money" : "future money"}</span>
               </div>
               <div className="gap-strip">
                 {planPhases.segs.map((sg, i) => (
@@ -2224,7 +2298,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
             // RETIREMENT
             if (goal.retire != null && goal.retire < 0)
-              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life.`, note: `Assumes spending stays at today's level through retirement (no lifestyle reduction). Income sources (salary ending, pensions starting) follow your plan exactly as entered. If retirement spending is lower, the earliest age could be sooner.` });
+              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life${goal.retireMargin != null && goal.retireMargin > 0 ? `, leaving about ${m(goal.retireMargin)} at plan end` : ""}.`, note: `Assumes spending stays at today's level through retirement (no lifestyle reduction). Income sources (salary ending, pensions starting) follow your plan exactly as entered. The estate figure is the margin of safety behind this answer — it's what differentiates an answer that's comfortably affordable from one that only just works.` });
             else
               cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works given current spending and assets.`, note: "Assumes spending stays unchanged in retirement. If retirement costs are lower, an earlier date may be feasible." });
 
@@ -2452,7 +2526,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       `Cashflow plan — ${clientName} (${reportDate})`,
                       verdictText,
                       `Net worth today: ${m(kpis.currentTotal)} · At retirement: ${m(kpis.atRetirement)} · End of plan (${kpis.endYear}): ${m(kpis.endVal)} · ${longevity}`,
-                      cashGap && !cashGap.none && !cashGap.oneOffOnly ? `Sustained draw on savings begins ${cashGap.firstYear} (~${m(cashGap.avgDraw)}/yr).` : cashGap && cashGap.oneOffOnly ? `Savings used for one-off costs only (${cashGap.isolatedYears.join(", ")}).` : `Income covers spending throughout — savings never drawn upon.`,
+                      cashGap && !cashGap.none && !cashGap.oneOffOnly ? `Sustained draw on savings begins ${reportCashGap.firstYear} (~${m(reportCashGap.avgDraw)}/yr).` : cashGap && cashGap.oneOffOnly ? `Savings used for one-off costs only (${reportCashGap.isolatedYears.join(", ")}).` : `Income covers spending throughout — savings never drawn upon.`,
                       `Figures in ${basis.toLowerCase()}. Illustration only — not financial advice.`,
                     ].filter(Boolean).join("\n\n");
                     navigator.clipboard && navigator.clipboard.writeText(sumLines).then(() => { setCopiedSummary(true); setTimeout(() => setCopiedSummary(false), 1800); });
@@ -2496,9 +2570,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       <div className="rep-exec-item"><span>Annual income today</span><b className="num">{m(inc0)}</b></div>
                       <div className="rep-exec-item"><span>Annual spending today</span><b className="num">{m(exp0)}</b></div>
                       <div className="rep-exec-item"><span>Current position</span><b className="num">{inc0 - exp0 >= 0 ? `${m(inc0 - exp0)} surplus` : `${m(exp0 - inc0)} drawn from savings`}</b></div>
-                      {cashGap && !cashGap.none && !cashGap.oneOffOnly && <div className="rep-exec-item"><span>Sustained draw on savings begins</span><b className="num">{cashGap.firstYear}</b></div>}
-                      {cashGap && cashGap.oneOffOnly && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">One-off costs only ({cashGap.isolatedYears.length} year{cashGap.isolatedYears.length === 1 ? "" : "s"})</b></div>}
-                      {cashGap && cashGap.none && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">None — income covers spending throughout</b></div>}
+                      {reportCashGap && !reportCashGap.none && !reportCashGap.oneOffOnly && <div className="rep-exec-item"><span>Sustained draw on savings begins</span><b className="num">{reportCashGap.firstYear}</b></div>}
+                      {reportCashGap && reportCashGap.oneOffOnly && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">One-off costs only ({reportCashGap.isolatedYears.length} year{reportCashGap.isolatedYears.length === 1 ? "" : "s"})</b></div>}
+                      {reportCashGap && reportCashGap.none && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">None — income covers spending throughout</b></div>}
                       <div className="rep-exec-item"><span>Projected estate ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
                     </div>
                     <p className="rep-p">This summary describes the projection under the stated assumptions. It is not a recommendation; figures will differ if actual returns, inflation, income or spending differ from those assumptions.</p>
@@ -2618,34 +2692,34 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </>)}
 
                 {/* Cash gap */}
-                {on("cashgap") && cashGap && (
+                {on("cashgap") && reportCashGap && (
                   <section className="report-page">
                     <h2 className="rep-h2">Cash gap analysis</h2>
-                    {cashGap.none ? (
+                    {reportCashGap.none ? (
                       <p className="rep-p rep-lede">Income covers spending in every year of the plan. Savings and investments are never drawn upon under the current assumptions.</p>
-                    ) : cashGap.oneOffOnly ? (<>
+                    ) : reportCashGap.oneOffOnly ? (<>
                       <p className="rep-p rep-lede">Income covers <b>regular</b> spending in every year of the plan. Savings are drawn on only for one-off costs.</p>
                       <table className="rep-table">
                         <tbody>
-                          <tr><td>Years with a one-off draw</td><td className="r num">{cashGap.isolatedYears.join(", ")}</td></tr>
-                          <tr><td>Largest draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
-                          <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
-                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</b></td></tr>}
+                          <tr><td>Years with a one-off draw</td><td className="r num">{reportCashGap.isolatedYears.join(", ")}</td></tr>
+                          <tr><td>Largest draw</td><td className="r num">{m(reportCashGap.peakDraw)} ({reportCashGap.peakYear})</td></tr>
+                          <tr><td>Total drawn over the plan</td><td className="r num">{m(reportCashGap.totalDrawn)}</td></tr>
+                          {reportCashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{reportCashGap.uncoveredCount}, starting {reportCashGap.firstUncoveredYear}</b></td></tr>}
                         </tbody>
                       </table>
                       <p className="rep-p">These appear as isolated orange bars on the money chart; there is no sustained reliance on savings. Figures in {basis.toLowerCase()}.</p>
                     </>) : (<>
-                      <p className="rep-p rep-lede">From <b className="num">{cashGap.firstYear}</b>, spending begins to exceed income. The gap is met by drawing on savings and investments.</p>
+                      <p className="rep-p rep-lede">From <b className="num">{reportCashGap.firstYear}</b>, spending begins to exceed income. The gap is met by drawing on savings and investments.</p>
                       <table className="rep-table">
                         <tbody>
-                          <tr><td>First sustained draw on savings</td><td className="r num">{cashGap.firstYear}</td></tr>
-                          <tr><td>Typical annual draw (first five years)</td><td className="r num">{m(cashGap.avgDraw)}</td></tr>
-                          <tr><td>Largest annual draw</td><td className="r num">{m(cashGap.peakDraw)} ({cashGap.peakYear})</td></tr>
-                          <tr><td>Total drawn over the plan</td><td className="r num">{m(cashGap.totalDrawn)}</td></tr>
-                          {cashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{cashGap.uncoveredCount}, starting {cashGap.firstUncoveredYear}</b></td></tr>}
+                          <tr><td>First sustained draw on savings</td><td className="r num">{reportCashGap.firstYear}</td></tr>
+                          <tr><td>Typical annual draw (first five years)</td><td className="r num">{m(reportCashGap.avgDraw)}</td></tr>
+                          <tr><td>Largest annual draw</td><td className="r num">{m(reportCashGap.peakDraw)} ({reportCashGap.peakYear})</td></tr>
+                          <tr><td>Total drawn over the plan</td><td className="r num">{m(reportCashGap.totalDrawn)}</td></tr>
+                          {reportCashGap.uncoveredCount > 0 && <tr><td>Years where the gap cannot be met</td><td className="r num"><b className="rep-gap-fig">{reportCashGap.uncoveredCount}, starting {reportCashGap.firstUncoveredYear}</b></td></tr>}
                         </tbody>
                       </table>
-                      <p className="rep-p">{cashGap.uncoveredCount > 0 ? "Where the gap cannot be met, spending in those years exceeds both income and remaining accessible assets — shown in red on the money chart." : "Every gap year is fully met from accessible assets under the current assumptions."} Figures in {basis.toLowerCase()}.</p>
+                      <p className="rep-p">{reportCashGap.uncoveredCount > 0 ? "Where the gap cannot be met, spending in those years exceeds both income and remaining accessible assets — shown in red on the money chart." : "Every gap year is fully met from accessible assets under the current assumptions."} Figures in {basis.toLowerCase()}.</p>
                     </>)}
                     {stressActive && <p className="rep-p rep-small">Computed on the base plan — the active stress scenario is reported on its own page.</p>}
                     <RepFoot />
@@ -2746,7 +2820,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <table className="rep-table">
                       <tbody>
                         <tr><td>How much could I spend each year and still be funded for life?</td><td className="r num">{goal.maxSpend != null ? `~${m(goal.maxSpend)}/yr` : "—"}</td></tr>
-                        <tr><td>When could I retire at today's spending?</td><td className="r num">{goal.earliestRetAge != null ? `Age ${goal.earliestRetAge}` : "—"}</td></tr>
+                        <tr><td>When could I retire at today's spending?</td><td className="r num">{goal.earliestRetAge != null ? `Age ${goal.earliestRetAge}${goal.retireMargin != null && goal.retireMargin > 0 ? ` (≈${m(goal.retireMargin)} estate)` : ""}` : "—"}</td></tr>
                         <tr><td>Largest one-off purchase today, from liquid assets (safe / maximum)</td><td className="r num">{goal.oneOff && goal.oneOff.liquidToday > 0 ? (goal.oneOff.safe > 0 ? `~${m(goal.oneOff.safe)} / ${m(goal.oneOff.max)}` : `none safely / ~${m(goal.oneOff.max)} max`) : "\u2014"}</td></tr>
                         <tr><td>Largest new permanent monthly cost, staying funded?</td><td className="r num">{goal.maxMonthly != null ? `~${sym}${Math.round(goal.maxMonthly).toLocaleString()}/mo` : "—"}</td></tr>
                         {!goal.to100 && goal.growth != null && <tr><td>Return uplift needed to fully fund the plan</td><td className="r num">+{goal.growth.toFixed(1)} pts on all assets</td></tr>}
