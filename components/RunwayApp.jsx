@@ -41,6 +41,7 @@ import {
   Shield,
   StickyNote,
   Home,
+  Activity,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -125,13 +126,81 @@ const TAX_PRESETS = {
   uk: { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }] },
   blank: { personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] },
 };
-// Stress scenarios — each returns {yearOffset: growthDeltaPts}. Args: retirement year offset, plan end offset.
+/* ---- Stress testing ---------------------------------------------------------------------------
+   Two families of scenario:
+   • Historical — illustrative annual-return sequences that capture the SHAPE of a real market
+     episode (a crash and its recovery), applied as ABSOLUTE returns for those years. Each has a
+     UK lens (broad UK equity) and a Global lens (broad global equity in the client's currency),
+     because a sterling-based and a globally-diversified investor lived very different versions of
+     the same crisis — a genuinely useful point to show an international client.
+   • Stylised — simple, fully explainable assumptions ("4 points below assumption for ten years"),
+     applied as a DELTA to the assumed growth rate.
+   Plus a Custom builder where the adviser types their own sequence.
+   Figures are rounded illustrations of each episode's shape, not point-accurate index data, and are
+   labelled as such in the report. They are not predictions. */
+
+// Absolute annual total returns (%), by market lens. Length = number of shocked years.
+const MARKET_HISTORY = {
+  gfc:     { uk: [-30, 30, 14, -3, 12], global: [-18, 16, 16, -6, 11] },   // 2008 crisis + recovery
+  dotcom:  { uk: [-6, -13, -22, 21, 13], global: [-9, -16, -27, 24, 14] }, // 2000–2003 tech unwind
+  covid:   { uk: [-30, 28], global: [-34, 35] },                           // 2020 pandemic V-shape
+  black87: { uk: [-28, 22], global: [-26, 20] },                           // 1987 sudden crash + bounce
+};
+
+const AFFECTS = { growth: ["investment", "pension"], all: null }; // null = every asset type
+
 const STRESS_SCENARIOS = [
-  { id: "crashNow", label: "Market crash now", desc: "A −35% equity fall this year (2008-style), then a +12% partial rebound the next year. Applied on top of assumed growth.", build: () => ({ 0: -35, 1: 12 }) },
-  { id: "crashRet", label: "Crash at retirement", desc: "The dangerous one — a −35% fall in the retirement year with a +12% rebound after, just as drawdown begins (sequence-of-returns risk). The pot value shown at retirement is the pre-shock snapshot; the full impact appears in the years that follow.", build: (r) => ({ [r]: -35, [r + 1]: 12 }) },
-  { id: "lostDecade", label: "Lost decade", desc: "Returns 4 percentage points below assumption for ten years, then back to normal.", build: () => { const o = {}; for (let i = 0; i < 10; i++) o[i] = -4; return o; } },
-  { id: "lowReturns", label: "Permanently lower returns", desc: "Returns 2 percentage points below assumption for the entire plan.", build: (r, end) => { const o = {}; for (let i = 0; i <= end; i++) o[i] = -2; return o; } },
+  { id: "gfc",     group: "historical", label: "2008 financial crisis", short: "A 2008-style crash, then a multi-year recovery.", lensable: true, timingable: true, mode: "absolute", build: (start, end, lens) => seqShocks(MARKET_HISTORY.gfc, lens, start) },
+  { id: "dotcom",  group: "historical", label: "Dot-com crash (2000–03)", short: "Three falling years as the tech bubble unwinds, then recovery.", lensable: true, timingable: true, mode: "absolute", build: (start, end, lens) => seqShocks(MARKET_HISTORY.dotcom, lens, start) },
+  { id: "covid",   group: "historical", label: "2020 pandemic shock", short: "A sudden ~30% fall and rapid V-shaped recovery.", lensable: true, timingable: true, mode: "absolute", build: (start, end, lens) => seqShocks(MARKET_HISTORY.covid, lens, start) },
+  { id: "black87", group: "historical", label: "1987 'Black Monday'", short: "A sharp single-shock crash that recovers within two years.", lensable: true, timingable: true, mode: "absolute", build: (start, end, lens) => seqShocks(MARKET_HISTORY.black87, lens, start) },
+  { id: "lostDecade", group: "stylised", label: "Lost decade", short: "Returns 4 points below your assumption for ten years, then back to normal.", lensable: false, timingable: true, mode: "delta", build: (start) => { const o = {}; for (let i = 0; i < 10; i++) o[start + i] = -4; return o; } },
+  { id: "lowReturns", group: "stylised", label: "Permanently lower returns", short: "Returns 2 points below your assumption for the whole plan.", lensable: false, timingable: false, mode: "delta", build: (start, end) => { const o = {}; for (let i = 0; i <= end; i++) o[i] = -2; return o; } },
+  { id: "custom",  group: "custom", label: "Custom sequence", short: "Enter your own run of annual returns.", lensable: false, timingable: true, mode: "absolute", build: null },
 ];
+// Map a return sequence onto plan-year offsets starting at `start`.
+function seqShocks(hist, lens, start) {
+  const seq = (hist && hist[lens]) || (hist && hist.uk) || [];
+  const o = {};
+  seq.forEach((v, i) => { o[start + i] = v; });
+  return o;
+}
+const stressById = (id) => STRESS_SCENARIOS.find((s) => s.id === id) || null;
+
+/* ---- Monte Carlo ------------------------------------------------------------------------------
+   Runs the full projection many times, each with a different random sequence of market returns drawn
+   around the SAME assumed growth. Counts how many runs keep the plan funded → a probability of success.
+   • Seeded RNG (mulberry32) + Box–Muller for a fixed, reproducible result on a given plan — re-running
+     the same inputs always gives the same figure, which matters for a documented suitability report.
+   • One standardised market move per year is shared across assets and scaled by each asset type's
+     volatility, so risky assets fall together in a bad year (a deliberately conservative, single-factor
+     model) while cash barely moves.
+   • Volatility is derived from each asset's assumed growth (higher expected return ⇒ higher volatility),
+     so a cautious plan isn't punished with aggressive-portfolio swings. One Lower/Typical/Higher knob
+     scales it. Returns are modelled as normal — real markets have fatter tails, so this is best read as
+     a resilience indicator, not a precise probability (stated plainly in the report). */
+const MC_SEED = 0x9e3779b9; // fixed → reproducible
+const MC_RUNS = 500;
+function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function makeNormal(rng) { let spare = null; return () => { if (spare !== null) { const s = spare; spare = null; return s; } let u, v, s; do { u = rng() * 2 - 1; v = rng() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0); const m = Math.sqrt((-2 * Math.log(s)) / s); spare = v * m; return u * m; }; }
+const MC_LEVELS = [
+  { id: "lower", label: "Lower", mult: 0.7 },
+  { id: "typical", label: "Typical", mult: 1.0 },
+  { id: "higher", label: "Higher", mult: 1.4 },
+];
+// Annual volatility (% points) per asset type, derived from the assumed growth of the assets of that type.
+function volByTypeFor(assets, levelMult) {
+  const K = { cash: 0.4, investment: 2.0, pension: 2.0, property: 1.4 };
+  const FLOOR = { cash: 0.5, investment: 6, pension: 6, property: 3 };
+  const CEIL = { cash: 2, investment: 22, pension: 22, property: 12 };
+  const out = {};
+  ["cash", "investment", "pension", "property"].forEach((t) => {
+    const rates = assets.filter((a) => a.type === t).map((a) => Number(a.growthRate) || 0);
+    const g = rates.length ? rates.reduce((s, x) => s + x, 0) / rates.length : 0;
+    out[t] = Math.max(FLOOR[t], Math.min(CEIL[t] * levelMult, g * (K[t] || 1.5) * levelMult));
+  });
+  return out;
+}
 const NOTE_COLORS = ["#8b5cf6", "#0ea5e9", "#f59e0b", "#ec4899", "#14b8a6", "#6366f1"];
 const noteColor = (i) => NOTE_COLORS[i % NOTE_COLORS.length];
 
@@ -291,7 +360,7 @@ function grossUpIncome(need, prior, period) {
   return hi;
 }
 
-function projectCashflow({ profile, assumptions, assets, incomes, expenses, liabilities = [], protection = [], lumpSums = [], incomeStop = null, shocks, autoInvestSurplus = true }) {
+function projectCashflow({ profile, assumptions, assets, incomes, expenses, liabilities = [], protection = [], lumpSums = [], incomeStop = null, shocks, shockTypes = null, shockMode = "delta", marketPath = null, volByType = null, autoInvestSurplus = true }) {
   const ctx = makeCtx(profile, assumptions);
   const couple = ctx.couple;
   const inflDec = (Number(assumptions.inflation) || 0) / 100;
@@ -403,9 +472,25 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       if (inCover) { const prem = (Number(p.premium) || 0) * 12 * frac; expenditure += prem; premiums += prem; }
     });
 
-    // grow balances over the (partial) year — a stress test adds a per-year growth shock (percentage points)
-    const shockPts = shocks && shocks[y] != null ? Number(shocks[y]) : 0;
-    assets.forEach((a) => (bal[a.id] = bal[a.id] * Math.pow(1 + ((Number(a.growthRate) || 0) + shockPts) / 100, frac)));
+    // grow balances over the (partial) year.
+    //  • Monte Carlo (marketPath set): a single standardised market move for the year (marketPath[y],
+    //    in standard deviations) is scaled by each asset type's volatility and added to its assumed
+    //    growth, so all risky assets move together in a good/bad year while cash barely moves. This is
+    //    the highest-precedence path and is never combined with a deterministic stress.
+    //  • Stress test (shocks set): a per-year shock to selected asset types only (shockTypes = null = all),
+    //    in "delta" mode (added to assumed growth) or "absolute" mode (the asset earns the shock outright).
+    // When none of these are set, this behaves exactly as the base plan.
+    const shockPts = shocks && shocks[y] != null ? Number(shocks[y]) : null;
+    const shockHits = (a) => shockPts != null && (!shockTypes || shockTypes.includes(a.type));
+    const z = marketPath ? (Number(marketPath[y]) || 0) : null;
+    assets.forEach((a) => {
+      const base = Number(a.growthRate) || 0;
+      let rate;
+      if (z !== null) rate = base + (volByType && volByType[a.type] != null ? Number(volByType[a.type]) : 0) * z;
+      else if (shockHits(a)) rate = shockMode === "absolute" ? shockPts : base + shockPts;
+      else rate = base;
+      bal[a.id] = bal[a.id] * Math.pow(1 + rate / 100, frac);
+    });
 
     // contributions (pro-rated; stop if owner has died)
     let contribPersonal = 0;
@@ -812,7 +897,17 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [goalOpen, setGoalOpen] = useState(false);
   const [stressOpen, setStressOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  // Monte Carlo — confidence overlay. Result is computed off the reactive path (only while open) and cached.
+  const [mcOpen, setMcOpen] = useState(false);
+  const [mcLevel, setMcLevel] = useState("typical");
+  const [mcResult, setMcResult] = useState(null); // { prob, fan, sig, level }
+  const [mcRun, setMcRun] = useState({ running: false, progress: 0 });
+  const mcToken = useRef(0);
   const [stress, setStress] = useState(null);
+  // Configuration for the active stress scenario. timing: "now" | "retirement"; lens: "uk" | "global";
+  // affects: "growth" (equities/pensions only) | "all"; custom: editable sequence of annual returns.
+  const [stressCfg, setStressCfg] = useState({ timing: "now", lens: "global", affects: "growth", custom: [-25, 10, 8] });
+  const upStressCfg = (patch) => setStressCfg((c) => ({ ...c, ...patch }));
   const [ci, setCi] = useState(null);
   const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000 });
   const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } — mirrors death to chart
@@ -899,9 +994,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   );
   const stressShocks = useMemo(() => {
     if (!stress) return null;
-    const sc = STRESS_SCENARIOS.find((s) => s.id === stress);
-    return sc ? sc.build(Math.max(0, ectx.retC1 - ectx.age0c1), ectx.planEndYear) : null;
-  }, [stress, ectx]);
+    const sc = stressById(stress);
+    if (!sc) return null;
+    const retOff = Math.max(0, ectx.retC1 - ectx.age0c1);
+    const start = sc.timingable && stressCfg.timing === "retirement" ? retOff : 0;
+    let shocks;
+    if (sc.id === "custom") {
+      shocks = {};
+      (stressCfg.custom || []).forEach((v, i) => { if (v != null && v !== "" && !isNaN(Number(v))) shocks[start + i] = Number(v); });
+    } else {
+      shocks = sc.build(start, ectx.planEndYear, stressCfg.lens);
+    }
+    if (!shocks || !Object.keys(shocks).length) return null;
+    return { shocks, shockTypes: AFFECTS[stressCfg.affects] ?? null, shockMode: sc.mode };
+  }, [stress, stressCfg, ectx]);
   const ciClaimYear = useMemo(() => {
     if (!ci) return null;
     const age0 = ci.owner === "client2" ? ectx.age0c2 : ectx.age0c1;
@@ -917,7 +1023,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       // would receive the sum assured twice and the plan would look far healthier than it is.
       return projectCashflow({ ...baseArgs, profile: sovProf });
     }
-    if (stressShocks) return projectCashflow({ ...baseArgs, shocks: stressShocks });
+    if (stressShocks) return projectCashflow({ ...baseArgs, shocks: stressShocks.shocks, shockTypes: stressShocks.shockTypes, shockMode: stressShocks.shockMode });
     return null;
   }, [ci, ciClaimYear, survivorOverlay, stressShocks, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, ectx, autoInvest]);
   const colors = useMemo(() => buildColors(assets), [assets]);
@@ -928,6 +1034,53 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const hasProperty = useMemo(() => assets.some((a) => a.type === "property"), [assets]);
 
   const inflDec = (Number(effAssumptions.inflation) || 0) / 100;
+
+  // Monte Carlo runner. Computes ONLY while the overlay is open, in small async chunks so the UI never
+  // blocks, and caches by an input signature so reopening an unchanged plan is instant. The reactive
+  // plan/chart path never triggers this — it is fully isolated from normal editing.
+  const mcSig = useMemo(
+    () => JSON.stringify({ p: effProfile, a: effAssumptions, s: effAssets, i: incomes, e: expenses, l: liabilities, r: protection, ai: autoInvest, lv: mcLevel }),
+    [effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, mcLevel]
+  );
+  useEffect(() => {
+    if (!mcOpen) return;
+    if (mcResult && mcResult.sig === mcSig) return; // cached and still fresh
+    const years = rows.length;
+    if (!years) return;
+    const token = ++mcToken.current;
+    const levelMult = (MC_LEVELS.find((l) => l.id === mcLevel) || MC_LEVELS[1]).mult;
+    const vol = volByTypeFor(effAssets, levelMult);
+    const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
+    const rng = mulberry32(MC_SEED), norm = makeNormal(rng);
+    const N = MC_RUNS, CHUNK = 25;
+    const cols = Array.from({ length: years }, () => new Float64Array(N));
+    let i = 0, successes = 0;
+    setMcRun({ running: true, progress: 0 });
+    const step = () => {
+      if (token !== mcToken.current) return; // superseded or overlay closed
+      const end = Math.min(i + CHUNK, N);
+      for (; i < end; i++) {
+        const path = new Array(years);
+        for (let y = 0; y < years; y++) path[y] = norm();
+        const rs = projectCashflow({ ...baseArgs, marketPath: path, volByType: vol });
+        let failed = false;
+        for (let y = 0; y < years; y++) {
+          const r = rs[y]; if (!r) continue;
+          if ((r.shortfall || 0) > 0) failed = true;
+          cols[y][i] = Math.max(0, (r.total || 0) - (r.property || 0) - (r.debt || 0)); // spendable
+        }
+        if (!failed) successes++;
+      }
+      if (i < N) { setMcRun({ running: true, progress: i / N }); setTimeout(step, 0); return; }
+      const pct = (arr, p) => { const a = Array.from(arr).sort((x, z) => x - z); const idx = (a.length - 1) * p; const lo = Math.floor(idx), hi = Math.ceil(idx); return a[lo] + (a[hi] - a[lo]) * (idx - lo); };
+      const fan = [];
+      for (let y = 0; y < years; y++) { const c = cols[y]; fan.push({ year: baseYear + y, y, p10: pct(c, 0.1), p25: pct(c, 0.25), p50: pct(c, 0.5), p75: pct(c, 0.75), p90: pct(c, 0.9) }); }
+      setMcResult({ prob: (successes / N) * 100, fan, sig: mcSig, level: mcLevel });
+      setMcRun({ running: false, progress: 1 });
+    };
+    setTimeout(step, 0);
+    return () => { mcToken.current++; setMcRun((s) => (s.running ? { running: false, progress: 0 } : s)); }; // cancel in-flight on close/change
+  }, [mcOpen, mcSig, rows.length, baseYear]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Comparison scenario — projected with its own assumptions, deflated by its own inflation,
   // then aligned to the active plan's chart by calendar year.
@@ -975,11 +1128,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   const stressImpact = useMemo(() => {
     if (!stressRows) return null;
-    const sc = STRESS_SCENARIOS.find((s) => s.id === stress);
+    const sc = stressById(stress);
     const ageOf = (dr) => (dr ? (dr.aliveC1 ? dr.c1Age : dr.c2Age) : null);
-    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : sc ? sc.label : "";
+    let scenarioLabel = "";
+    if (sc) {
+      const bits = [sc.label];
+      if (sc.timingable && stressCfg.timing === "retirement") bits.push("at retirement");
+      if (sc.lensable) bits.push(stressCfg.lens === "global" ? "global equity" : "UK equity");
+      scenarioLabel = bits.join(" · ");
+    }
+    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : scenarioLabel;
     return { label, baseAge: ageOf(rows.find((r) => r.shortfall > 0)), stressAge: ageOf(stressRows.find((r) => r.shortfall > 0)) };
-  }, [stressRows, rows, stress, ci, fn1, fn2]);
+  }, [stressRows, rows, stress, stressCfg, ci, survivorOverlay, fn1, fn2]);
 
   // Decompose the survivor-plan impact so the headline net-worth swing isn't misread as "the payout".
   // The swing is cover + lower (survivor-rate) household spending − the deceased's lost earnings.
@@ -2156,6 +2316,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="view-seg"><button className={moneyMode === "real" ? "on" : ""} onClick={() => setMoneyMode("real")}>Today's {sym}</button><button className={moneyMode === "nominal" ? "on" : ""} onClick={() => setMoneyMode("nominal")}>Future {sym}</button></div>
                   <button className="goal-btn" onClick={() => setGoalOpen(true)}><Target size={14} /> What if…</button>
                   <button className={`goal-btn ${stress || ci ? "on" : ""}`} onClick={() => setStressOpen(true)}><AlertTriangle size={14} /> Stress test</button>
+                  <button className="goal-btn" onClick={() => setMcOpen(true)}><Activity size={14} /> Confidence</button>
                 </div>
               )}
             </div>
@@ -2180,7 +2341,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="stress-bar">
                 <span className="stress-tag"><AlertTriangle size={12} /> {stressImpact.label}</span>
                 <span className="stress-impact">{stressImpact.stressAge ? `funds run short at ${stressImpact.stressAge}` : "still funded for life"}{stressImpact.baseAge !== stressImpact.stressAge ? ` · base ${stressImpact.baseAge ?? "fully funded"}` : ""}</span>
-                {stress === "crashRet" && <span className="stress-impact" style={{opacity:0.7}}>· pot at retirement shows pre-shock value — impact visible in subsequent years</span>}
+                {stress && stressCfg.timing === "retirement" && stressById(stress)?.timingable && <span className="stress-impact" style={{opacity:0.7}}>· pot at retirement shows pre-shock value — impact visible in subsequent years</span>}
                 <button className="wi-reset" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear</button>
               </div>
             )}
@@ -2423,14 +2584,67 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <button onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear overlay</button>
                 </div>
               )}
-              <div className="goal-cards">
-                {STRESS_SCENARIOS.map((s) => (
-                  <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { setStress(s.id); setCi(null); setSurvivorOverlay(null); setStressOpen(false); } }}>
-                    <div className="goal-card-head"><AlertTriangle size={14} /> {s.label}</div>
-                    <div className="goal-card-text">{s.desc}</div>
-                  </button>
-                ))}
-              </div>
+              {[
+                { key: "historical", title: "Historical episodes", note: "Illustrative sequences shaped on real market crises and their recoveries." },
+                { key: "stylised", title: "Stylised assumptions", note: "Simple, fully explainable shocks applied to your growth assumption." },
+                { key: "custom", title: "Build your own", note: "Type a run of annual returns from the start year." },
+              ].map((grp) => (
+                <div className="stress-group" key={grp.key}>
+                  <div className="stress-group-head">{grp.title}<span>{grp.note}</span></div>
+                  <div className="goal-cards">
+                    {STRESS_SCENARIOS.filter((s) => s.group === grp.key).map((s) => (
+                      <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { setStress(s.id); setCi(null); setSurvivorOverlay(null); } }}>
+                        <div className="goal-card-head"><AlertTriangle size={14} /> {s.label}</div>
+                        <div className="goal-card-text">{s.short}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              {/* Live configuration for the selected scenario */}
+              {stress && (() => {
+                const sc = stressById(stress);
+                if (!sc) return null;
+                const cust = stressCfg.custom || [];
+                return (
+                  <div className="stress-cfg">
+                    <div className="stress-cfg-row">
+                      {sc.timingable && (
+                        <div className="rec-field"><label>When it hits <InfoTip text="“At retirement” lands the shock just as drawdown begins — the most damaging timing, because losses are locked in by withdrawals (sequence-of-returns risk)." /></label>
+                          <Seg value={stressCfg.timing} onChange={(v) => upStressCfg({ timing: v })} options={[{ value: "now", label: "Starting now" }, { value: "retirement", label: "At retirement" }]} /></div>
+                      )}
+                      {sc.lensable && (
+                        <div className="rec-field"><label>Market lens <InfoTip text="A sterling investor and a globally-diversified investor lived very different versions of the same crisis. Global uses broad world equity in the client's currency; UK uses broad UK equity." /></label>
+                          <Seg value={stressCfg.lens} onChange={(v) => upStressCfg({ lens: v })} options={[{ value: "global", label: "Global" }, { value: "uk", label: "UK" }]} /></div>
+                      )}
+                      <div className="rec-field"><label>Applies to <InfoTip text="Most crashes hit equities and pension funds hardest while cash and property hold up. Switch to “All assets” to shock everything, including property." /></label>
+                        <Seg value={stressCfg.affects} onChange={(v) => upStressCfg({ affects: v })} options={[{ value: "growth", label: "Equities & pensions" }, { value: "all", label: "All assets" }]} /></div>
+                    </div>
+                    {sc.id === "custom" && (
+                      <div className="stress-custom">
+                        <div className="stress-custom-lbl">Annual returns from the start year (%)</div>
+                        <div className="stress-custom-rows">
+                          {cust.map((v, i) => (
+                            <div className="stress-custom-cell" key={i}>
+                              <span className="stress-custom-yr">Yr {i + 1}</span>
+                              <Mini value={v} suffix="%" step={1} onChange={(nv) => upStressCfg({ custom: cust.map((x, j) => (j === i ? nv : x)) })} />
+                              <button className="stress-custom-x" onClick={() => upStressCfg({ custom: cust.filter((_, j) => j !== i) })}>×</button>
+                            </div>
+                          ))}
+                          <button className="stress-custom-add" onClick={() => upStressCfg({ custom: [...cust, 0] })}><Plus size={13} /> year</button>
+                        </div>
+                      </div>
+                    )}
+                    {stressImpact && (
+                      <div className="stress-verdict">
+                        <div className="stress-verdict-row"><span>Base plan</span><b>{stressImpact.baseAge ? `Funds to age ${stressImpact.baseAge}` : "Funded for life"}</b></div>
+                        <div className={`stress-verdict-row ${stressImpact.stressAge && stressImpact.stressAge !== stressImpact.baseAge ? "worse" : ""}`}><span>Under this scenario</span><b>{stressImpact.stressAge ? `Funds to age ${stressImpact.stressAge}` : "Still funded for life"}</b></div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               <div className={`ci-block ${ci ? "on" : ""}`}>
                 <div className="ci-head"><Shield size={14} /> Critical illness claim</div>
                 <div className="ci-text">Model a serious-illness diagnosis: a lump sum is paid and {couple ? "the affected person's" : "your"} salary-type income stops from that age. If already retired, only the lump sum applies. To show the impact of lost income with <b>no cover in place</b>, set the payout to {sym}0.</div>
@@ -2445,10 +2659,83 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {ci && <button className="ci-clear" onClick={() => setCi(null)}>Clear</button>}
                 </div>
               </div>
-              <div className="modal-foot">{(stress || ci) ? <button className="wi-reset" onClick={() => { setStress(null); setCi(null); setStressOpen(false); }}>Clear stress test</button> : "The base plan is unchanged — this only overlays a comparison line so you can show the client the plan still holds (or where it doesn't)."}</div>
+              <div className="modal-foot">
+                {(stress || ci)
+                  ? <div className="stress-foot-actions"><button className="wi-reset" onClick={() => { setStress(null); setCi(null); setStressOpen(false); }}>Clear stress test</button><button className="goal-btn" onClick={() => setStressOpen(false)}>↗ Show on chart</button></div>
+                  : "The base plan is unchanged — this only overlays a comparison line so you can show the client the plan still holds (or where it doesn't)."}
+              </div>
             </div>
           </div>
         )}
+        {mcOpen && (() => {
+          const ready = mcResult && mcResult.sig === mcSig;
+          const prob = ready ? mcResult.prob : (mcResult ? mcResult.prob : null);
+          const pill = prob == null ? "" : prob >= 85 ? "green" : prob >= 60 ? "amber" : "red";
+          const retYear = baseYear + Math.max(0, ectx.retC1 - ectx.age0c1);
+          const d0 = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+          const fanData = mcResult ? mcResult.fan.map((f) => ({ year: f.year, band80: [d0(f.p10, f.y), d0(f.p90, f.y)], band50: [d0(f.p25, f.y), d0(f.p75, f.y)], p50: d0(f.p50, f.y) })) : [];
+          const endF = mcResult ? mcResult.fan[mcResult.fan.length - 1] : null;
+          const basisTxt = showReal ? "today's money" : "future money";
+          return (
+            <div className="modal-scrim" onClick={() => setMcOpen(false)}>
+              <div className="modal mc-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-head">
+                  <div><div className="modal-title"><Activity size={16} /> Plan confidence</div><div className="modal-sub">How the plan holds up across {MC_RUNS} randomised market futures, varied around your assumed growth.</div></div>
+                  <button className="icon-btn" onClick={() => setMcOpen(false)}><XCircle size={18} /></button>
+                </div>
+
+                {mcRun.running && (
+                  <div className="mc-progress"><div className="mc-progress-bar" style={{ width: `${Math.round(mcRun.progress * 100)}%` }} /><span>Running simulations… {Math.round(mcRun.progress * 100)}%</span></div>
+                )}
+
+                {mcResult && (
+                  <div className={`mc-body ${mcRun.running ? "dim" : ""}`}>
+                    <div className="mc-headline">
+                      <div className={`mc-prob mc-prob-${pill}`}>{Math.round(prob)}<span>%</span></div>
+                      <div className="mc-headline-txt">
+                        <div className="mc-headline-main">of {MC_RUNS} simulated futures keep the plan <b>funded for life</b></div>
+                        <div className="mc-headline-sub">The single-line plan assumes returns arrive smoothly. This varies them year to year — capturing the risk of a bad run, especially around retirement.</div>
+                      </div>
+                    </div>
+
+                    <div className="mc-controls">
+                      <div className="rec-field"><label>Market volatility <InfoTip text="How widely returns swing around your assumed growth. Derived from each asset's expected return — higher-returning assets are assumed more volatile. Cash barely moves; equities and pensions move most. Lower / Typical / Higher scales the whole range." /></label>
+                        <Seg value={mcLevel} onChange={setMcLevel} options={MC_LEVELS.map((l) => ({ value: l.id, label: l.label }))} /></div>
+                    </div>
+
+                    <div className="mc-chart">
+                      <div className="mc-chart-title">Spendable assets — range of outcomes <span>({basisTxt}, excludes property)</span></div>
+                      <ResponsiveContainer width="100%" height={250}>
+                        <ComposedChart data={fanData} margin={{ top: 8, right: 14, left: 6, bottom: 2 }}>
+                          <CartesianGrid stroke={t.grid} vertical={false} />
+                          <XAxis dataKey="year" tick={{ fill: t.mid, fontSize: 11 }} axisLine={{ stroke: t.grid }} tickLine={false} interval={Math.max(0, Math.floor(fanData.length / 9))} />
+                          <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: t.mid, fontSize: 11 }} axisLine={false} tickLine={false} width={52} />
+                          <Area type="monotone" dataKey="band80" stroke="none" fill={t.accent} fillOpacity={0.14} isAnimationActive={false} />
+                          <Area type="monotone" dataKey="band50" stroke="none" fill={t.accent} fillOpacity={0.26} isAnimationActive={false} />
+                          <Line type="monotone" dataKey="p50" stroke={t.accent} strokeWidth={2.4} dot={false} isAnimationActive={false} />
+                          {retYear > baseYear && <ReferenceLine x={retYear} stroke={t.mid} strokeDasharray="3 3" label={{ value: "Retirement", position: "top", fill: t.mid, fontSize: 10 }} />}
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                      <div className="mc-fan-key"><span><i style={{ background: t.accent, opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: t.accent, opacity: 0.14 }} /> Middle 80%</span><span><i className="mc-key-line" style={{ background: t.accent }} /> Median path</span></div>
+                    </div>
+
+                    {endF && (
+                      <div className="mc-stats">
+                        <div className="mc-stat"><div className="mc-stat-lbl">Downside ({mcResult.fan[mcResult.fan.length - 1].year})</div><div className="mc-stat-val">{fmtCompact(d0(endF.p10, endF.y), cur)}</div><div className="mc-stat-sub">1-in-10 worse than this</div></div>
+                        <div className="mc-stat mc-stat-mid"><div className="mc-stat-lbl">Median</div><div className="mc-stat-val">{fmtCompact(d0(endF.p50, endF.y), cur)}</div><div className="mc-stat-sub">the typical outcome</div></div>
+                        <div className="mc-stat"><div className="mc-stat-lbl">Upside</div><div className="mc-stat-val">{fmtCompact(d0(endF.p90, endF.y), cur)}</div><div className="mc-stat-sub">1-in-10 better than this</div></div>
+                      </div>
+                    )}
+
+                    <p className="mc-note">Spendable assets exclude property and are shown in {basisTxt}. Returns are modelled as normal variation around your assumptions with a shared market factor, so growth assets move together in good and bad years. Real markets have occasional shocks larger than this model assumes, so treat the figure as an indicator of resilience, not a precise probability. Illustration only — not a prediction or a recommendation.</p>
+                  </div>
+                )}
+
+                {!mcResult && !mcRun.running && <div className="mc-empty">Preparing simulation…</div>}
+              </div>
+            </div>
+          );
+        })()}
         {reportOpen && (() => {
           const reportDate = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
           const anon = reportCfg.anonymous;
@@ -2481,6 +2768,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             { id: "charts", label: "Projection charts" },
             { id: "cashgap", label: "Cash gap analysis" },
             { id: "stress", label: "Stress test result", off: !stressActive, why: "no stress test active" },
+            { id: "mcconf", label: "Plan confidence (Monte Carlo)", off: !(mcResult && mcResult.sig === mcSig), why: "run a Confidence simulation first" },
             { id: "protection", label: "Protection & gap analysis", off: protection.length === 0 && !(protGap && protGap.bench.some((b) => b.inc > 0)), why: "no policies or income entered" },
             { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
             { id: "inputs", label: "Detailed inputs", },
@@ -2490,8 +2778,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           ];
           const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
           const setPreset = (kind) => {
-            const brief = { exec: true, snapshot: false, yeartable: true, charts: true, cashgap: false, stress: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
-            const comp = { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
+            const brief = { exec: true, snapshot: false, yeartable: true, charts: true, cashgap: false, stress: false, mcconf: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
+            const comp = { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, mcconf: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
             upReportCfg({ sections: kind === "brief" ? brief : comp });
           };
           const verdictText = kpis.depletionAge === null
@@ -2784,6 +3072,17 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <section className="report-page">
                     <h2 className="rep-h2">Stress test</h2>
                     <p className="rep-p rep-lede">Scenario applied: <b>{stressImpact.label}</b></p>
+                    {(() => {
+                      const sc = !ci && !survivorOverlay ? stressById(stress) : null;
+                      if (!sc) return null;
+                      const affTxt = stressCfg.affects === "all" ? "all asset types" : "equities and pension funds (cash and property are held steady)";
+                      const basis = sc.group === "historical"
+                        ? `This applies an illustrative annual-return sequence reflecting the shape of the episode to ${affTxt}. It is a stylised representation, not point-accurate index data, and not a forecast.`
+                        : sc.id === "custom"
+                          ? `This applies the adviser-entered annual returns to ${affTxt}.`
+                          : `This applies the stated reduction to the assumed growth rate of ${affTxt}.`;
+                      return <p className="rep-p rep-sub">{basis}</p>;
+                    })()}
                     <table className="rep-table">
                       <tbody>
                         <tr><td>Base plan</td><td className="r">{stressImpact.baseAge ? `Funds to age ${stressImpact.baseAge}` : "Funded for life"}</td></tr>
@@ -2816,8 +3115,42 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   );
                 })()}
 
-                {/* Protection snapshot */}
-                {on("protection") && (protSnap || protGap) && (
+                {/* Plan confidence (Monte Carlo) */}
+                {on("mcconf") && mcResult && mcResult.sig === mcSig && (() => {
+                  const d0 = (v, y) => (showReal ? v / Math.pow(1 + inflDec, y) : v);
+                  const fd = mcResult.fan.map((f) => ({ year: f.year, band80: [d0(f.p10, f.y), d0(f.p90, f.y)], band50: [d0(f.p25, f.y), d0(f.p75, f.y)], p50: d0(f.p50, f.y) }));
+                  const endF = mcResult.fan[mcResult.fan.length - 1];
+                  const lvl = (MC_LEVELS.find((l) => l.id === mcResult.level) || MC_LEVELS[1]).label.toLowerCase();
+                  const p = Math.round(mcResult.prob);
+                  return (
+                    <section className="report-page">
+                      <h2 className="rep-h2">Plan confidence</h2>
+                      <p className="rep-p rep-lede">Across <b>{MC_RUNS}</b> simulated futures with market returns varied around the plan's assumptions ({lvl} volatility), <b>{p}%</b> keep the plan funded for life.</p>
+                      <p className="rep-p rep-sub">The main projection assumes returns arrive smoothly each year. This test varies them — modelling good and bad runs of markets, including a poor run early in retirement — and counts how often the plan still holds.</p>
+                      <table className="rep-table">
+                        <tbody>
+                          <tr><td>Simulations remaining funded for life</td><td className="r"><b>{p}%</b></td></tr>
+                          <tr><td>Spendable assets at {endF.year} — downside (lowest 10%)</td><td className="r">{m(d0(endF.p10, endF.y))}</td></tr>
+                          <tr><td>Spendable assets at {endF.year} — median</td><td className="r">{m(d0(endF.p50, endF.y))}</td></tr>
+                          <tr><td>Spendable assets at {endF.year} — upside (highest 10%)</td><td className="r">{m(d0(endF.p90, endF.y))}</td></tr>
+                        </tbody>
+                      </table>
+                      <div className="rep-chart">
+                        <ComposedChart width={700} height={250} data={fd} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                          <CartesianGrid stroke="#eceff3" vertical={false} />
+                          <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(fd.length / 9))} />
+                          <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
+                          <Area type="monotone" dataKey="band80" stroke="none" fill="#2f6fb0" fillOpacity={0.13} isAnimationActive={false} />
+                          <Area type="monotone" dataKey="band50" stroke="none" fill="#2f6fb0" fillOpacity={0.26} isAnimationActive={false} />
+                          <Line type="monotone" dataKey="p50" stroke="#2f6fb0" strokeWidth={2.2} dot={false} isAnimationActive={false} />
+                        </ComposedChart>
+                      </div>
+                      <div className="rep-legend"><span><i style={{ background: "#2f6fb0", opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: "#2f6fb0", opacity: 0.13 }} /> Middle 80%</span><span><i className="rep-solid" style={{ background: "#2f6fb0" }} /> Median path</span></div>
+                      <p className="rep-p rep-sub">Spendable assets exclude property, in {showReal ? "today's money" : "future money"}. Returns are modelled as normal variation with a shared market factor; real markets carry occasional larger shocks, so this is an indicator of resilience, not a precise probability or a forecast.</p>
+                      <RepFoot />
+                    </section>
+                  );
+                })()}
                   <section className="report-page">
                     <h2 className="rep-h2">Protection</h2>
                     {protection.length === 0
@@ -3343,6 +3676,58 @@ const CSS = `
 .stress-card{text-align:left;border:1px solid var(--border);border-left-width:3px;border-left-color:var(--border);border-radius:10px;padding:12px 14px;background:var(--bg);cursor:pointer;font-family:inherit;width:100%;transition:border-color .12s;}
 .stress-card:hover{border-left-color:var(--red);}
 .stress-card.on{border-left-color:var(--red);background:color-mix(in srgb, var(--red) 7%, transparent);}
+.stress-group{margin-bottom:14px;}
+.stress-group-head{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--low);margin-bottom:7px;display:flex;flex-direction:column;gap:2px;}
+.stress-group-head span{font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--mid);}
+.stress-cfg{margin-top:4px;margin-bottom:14px;padding:13px 14px;border:1px solid var(--border);border-radius:10px;background:var(--panel);}
+.stress-cfg-row{display:flex;flex-wrap:wrap;gap:14px;}
+.stress-cfg-row .rec-field{flex:1;min-width:150px;}
+.stress-custom{margin-top:12px;}
+.stress-custom-lbl{font-size:11px;color:var(--low);font-weight:500;margin-bottom:7px;}
+.stress-custom-rows{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.stress-custom-cell{display:flex;align-items:center;gap:5px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:4px 6px 4px 8px;}
+.stress-custom-yr{font-size:11px;color:var(--low);}
+.stress-custom-x{border:none;background:none;color:var(--low);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;}
+.stress-custom-x:hover{color:var(--red);}
+.stress-custom-add{display:flex;align-items:center;gap:3px;border:1px dashed var(--border);background:none;color:var(--mid);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;font-family:inherit;}
+.stress-custom-add:hover{border-color:var(--accent);color:var(--accent);}
+.stress-verdict{margin-top:13px;border-top:1px solid var(--border);padding-top:11px;display:flex;flex-direction:column;gap:6px;}
+.stress-verdict-row{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--mid);}
+.stress-verdict-row b{color:var(--ink);font-weight:600;}
+.stress-verdict-row.worse b{color:var(--red);}
+.stress-foot-actions{display:flex;gap:9px;align-items:center;justify-content:flex-end;width:100%;}
+.rep-sub{font-size:12px;color:var(--mid);margin-top:-4px;}
+.mc-modal{max-width:680px;width:100%;}
+.mc-progress{position:relative;height:24px;border-radius:7px;background:var(--track);overflow:hidden;margin-bottom:14px;display:flex;align-items:center;}
+.mc-progress-bar{position:absolute;left:0;top:0;bottom:0;background:color-mix(in srgb, var(--accent) 30%, transparent);transition:width .12s linear;}
+.mc-progress span{position:relative;font-size:11.5px;color:var(--mid);padding-left:10px;}
+.mc-body.dim{opacity:.5;pointer-events:none;}
+.mc-headline{display:flex;align-items:center;gap:16px;margin-bottom:16px;}
+.mc-prob{font-size:54px;font-weight:700;line-height:1;letter-spacing:-.02em;}
+.mc-prob span{font-size:24px;font-weight:600;margin-left:1px;}
+.mc-prob-green{color:var(--green);}
+.mc-prob-amber{color:var(--amber);}
+.mc-prob-red{color:var(--red);}
+.mc-headline-txt{flex:1;}
+.mc-headline-main{font-size:15px;color:var(--ink);line-height:1.45;}
+.mc-headline-sub{font-size:12.5px;color:var(--mid);line-height:1.5;margin-top:5px;}
+.mc-controls{margin-bottom:14px;}
+.mc-controls .rec-field{max-width:280px;}
+.mc-chart{margin-bottom:14px;}
+.mc-chart-title{font-size:12.5px;font-weight:600;color:var(--ink);margin-bottom:8px;}
+.mc-chart-title span{font-weight:400;color:var(--mid);}
+.mc-fan-key{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:11.5px;color:var(--mid);}
+.mc-fan-key i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
+.mc-fan-key .mc-key-line{height:3px;border-radius:2px;}
+.mc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;}
+.mc-stat{border:1px solid var(--border);border-radius:10px;padding:11px 13px;background:var(--bg);}
+.mc-stat-mid{background:var(--panel);border-color:color-mix(in srgb, var(--accent) 30%, var(--border));}
+.mc-stat-lbl{font-size:11px;color:var(--low);font-weight:500;}
+.mc-stat-val{font-size:18px;font-weight:700;color:var(--ink);margin:3px 0 1px;}
+.mc-stat-sub{font-size:11px;color:var(--mid);}
+.mc-note{font-size:11.5px;color:var(--mid);line-height:1.55;margin:0;}
+.mc-empty{padding:30px 10px;text-align:center;color:var(--mid);font-size:13px;}
+@media(max-width:560px){.mc-headline{flex-direction:column;align-items:flex-start;gap:8px;}.mc-stats{grid-template-columns:1fr;}}
 .whatif{margin-top:10px;border:1px solid var(--border);background:var(--bg);border-radius:11px;padding:10px 13px 12px;transition:border-color .15s;}
 .whatif.active{border-color:var(--accent);}
 .whatif-head{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
