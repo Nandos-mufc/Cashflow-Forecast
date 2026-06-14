@@ -730,6 +730,19 @@ function QuickDel({ onConfirm, label = "Remove" }) {
   );
 }
 
+function ClearAll({ onConfirm, count }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => { if (!armed) return; const t = setTimeout(() => setArmed(false), 2200); return () => clearTimeout(t); }, [armed]);
+  if (!count) return null;
+  return (
+    <span role="button" tabIndex={0} className={`qdel clear-all ${armed ? "armed" : ""}`} title={armed ? "Click again to clear all" : `Clear all ${count}`}
+      onClick={(e) => { e.stopPropagation(); if (armed) { onConfirm(); setArmed(false); } else setArmed(true); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); if (armed) { onConfirm(); setArmed(false); } else setArmed(true); } }}>
+      {armed ? <em>Clear all?</em> : <span style={{fontSize:"11px",display:"flex",alignItems:"center",gap:4}}><Trash2 size={11} />Clear all</span>}
+    </span>
+  );
+}
+
 /* ================================================================== */
 function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expanded, onToggle, onChange, onRemove }) {
   const per = { weekly: "/wk", monthly: "/mo", annual: "/yr", oneoff: "one-off", everyN: `/${item.everyYears}yr` }[item.frequency];
@@ -1068,11 +1081,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const eventList = useMemo(() => {
     const ev = [];
     if (markers.retC1) {
-      // Suppress the deceased partner's retirement marker when survivor overlay is active
       const c1IsDead = survivorOverlay && survivorOverlay.owner === "client1";
-      if (!c1IsDead) ev.push({ label: couple ? `${fn1} retires` : "Retirement", year: markers.retC1, color: t.ink });
-    }
-    if (markers.retC2) {
+      const c2IsDead = survivorOverlay && survivorOverlay.owner === "client2";
+      // If both retire the same year and neither is dead, collapse to one marker
+      if (couple && markers.retC2 === markers.retC1 && !c1IsDead && !c2IsDead) {
+        ev.push({ label: "Both retire", year: markers.retC1, color: t.ink });
+      } else {
+        if (!c1IsDead) ev.push({ label: couple ? `${fn1} retires` : "Retirement", year: markers.retC1, color: t.ink });
+        if (markers.retC2) {
+          if (!c2IsDead) ev.push({ label: `${fn2} retires`, year: markers.retC2, color: t.ink });
+        }
+      }
+    } else if (markers.retC2) {
       const c2IsDead = survivorOverlay && survivorOverlay.owner === "client2";
       if (!c2IsDead) ev.push({ label: `${fn2} retires`, year: markers.retC2, color: t.ink });
     }
@@ -1510,6 +1530,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const upInc = patch(setIncomes), rmInc = rmFn(setIncomes);
   const upExp = patch(setExpenses), rmExp = rmFn(setExpenses);
   const upLiab = patch(setLiabilities), rmLiab = rmFn(setLiabilities);
+  const clearAssets = () => { setAssets([]); setOpen(new Set()); };
+  const clearIncomes = () => { setIncomes([]); setOpen(new Set()); };
+  const clearExpenses = () => { setExpenses([]); setOpen(new Set()); };
+  const clearLiabilities = () => { setLiabilities([]); setOpen(new Set()); };
+  const clearProtection = () => { setProtection([]); setOpen(new Set()); };
   const addLiab = () => addOpen(setLiabilities, { id: uid(), name: "New liability", type: "mortgage", balance: 0, rate: 4, monthlyPayment: 0, owner: couple ? "joint" : "client1" }, liabilities);
   const upPol = patch(setProtection), rmPol = rmFn(setProtection);
   const addPol = () => addOpen(setProtection, { id: uid(), name: "New policy", insured: "client1", sumAssured: 250000, premium: 50, coverToAge: 90 }, protection);
@@ -1853,7 +1878,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "assets" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={assets.length} onConfirm={clearAssets} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
                 {assets.length === 0 && <p className="empty-note">No assets yet. Add savings, investments, pensions or property — the chart builds from here.</p>}
                 {assets.map((a) => {
                   const expanded = open.has(a.id);
@@ -1943,7 +1968,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "income" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Income</h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Income</h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={incomes.length} onConfirm={clearIncomes} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
                 {incomes.length === 0 && <p className="empty-note">No income yet. Add salary, rental, dividends or pension income with start and end dates.</p>}
                 {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => openSolo(i.id, incomes)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
                 <p className="ed-hint">End salary at "Retirement" and it tracks each person's retirement age. {couple ? "Set what happens to each income on that person's death." : ""}</p>
@@ -1952,7 +1977,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "expenditure" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Expenditure</h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Expenditure</h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={expenses.length} onConfirm={clearExpenses} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
                 {expenses.length === 0 && <p className="empty-note">No spending yet. Add essential and lifestyle costs — the gap between income and spending drives the whole plan.</p>}
                 {expenses.map((e) => <StreamRow key={e.id} item={e} sym={sym} kind="expense" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(e.id)} onToggle={() => openSolo(e.id, expenses)} onChange={(p) => upExp(e.id, p)} onRemove={() => rmExp(e.id)} />)}
                 <p className="ed-hint">One-off and "every N years" cover ad-hoc costs. {couple ? "Joint costs step down to the survivor rate after a death; personal costs cease." : ""}</p>
@@ -1960,7 +1985,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "liabilities" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Liabilities</h2><div className="ed-head-tools"><ExpandCtl items={liabilities} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addLiab}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Liabilities</h2><div className="ed-head-tools"><ExpandCtl items={liabilities} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={liabilities.length} onConfirm={clearLiabilities} /><button className="add-btn" onClick={addLiab}><Plus size={15} /> Add</button></div></div>
                 {liabilities.length === 0 && <p className="empty-note">No debts yet. Add a mortgage, BTL loan, or other borrowing — it reduces net worth and its repayments count as spending.</p>}
                 {liabilities.map((L) => {
                   const expanded = open.has(L.id);
@@ -1999,7 +2024,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "protection" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Protection</h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Protection</h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={protection.length} onConfirm={clearProtection} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
                 {protection.length === 0 && <p className="empty-note">No policies yet. Add life cover to model what a lump sum on death would mean for the survivor's plan.</p>}
                 {protection.map((p) => {
                   const expanded = open.has(p.id);
@@ -2124,7 +2149,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
           <div className="chart-card">
             <div className="chart-head">
-              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; const showTax = lifetimeTax > 0 || (compareMap.lifeTax || 0) > 0; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{showTax ? <> · lifetime tax {fmtFull(compareMap.lifeTax || 0, cur)} vs {fmtFull(lifetimeTax, cur)} here</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
+              <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}{survivorOverlay ? <> · <InfoTip text="The chart shows net worth at the start of each age-year, before that year's cashflows are processed. Death at a given age takes effect in the following year's snapshot — income and contributions stop, cover pays in, and survivor spending adjusts. This means the divergence between the two lines typically appears one to two years after the death age shown." /></> : null}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; const showTax = lifetimeTax > 0 || (compareMap.lifeTax || 0) > 0; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{showTax ? <> · lifetime tax {fmtFull(compareMap.lifeTax || 0, cur)} vs {fmtFull(lifetimeTax, cur)} here</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
               {!present && (
                 <div className="head-toggles">
                   <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
@@ -2170,6 +2195,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {s.cover > 0 ? ` — cover adds ${fmtFull(Math.abs(s.coverEffect), cur)}` : " — no cover pays out"}
                     {`, lower survivor spending less lost earnings ${s.deathEffect >= 0 ? "+" : "−"}${fmtFull(Math.abs(s.deathEffect), cur)}`}
                   </span>
+                  {s.deathEffect >= 0 && s.total >= 0 && (
+                    <span className="stress-note"><InfoTip text={`The survivor's plan is projected to be better off than the base plan — the ${100 - (Number(assumptions.survivorExpenseFactor) || 67)}% reduction in ongoing joint spending outweighs ${s.diedName}'s lost income. This is financially correct given the income and spending assumptions entered, but worth discussing carefully in context: the model reflects economics, not the full picture of what losing a partner means.`} /> This result is financially correct — reduced spending outweighs lost earnings</span>
+                  )}
                   <button className="wi-reset" onClick={() => setSurvivorOverlay(null)}>Clear</button>
                 </div>
               );
@@ -2470,7 +2498,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             ? `Based on the assumptions set out in this report, the plan remains fully funded throughout, with approximately ${m(kpis.endVal)} of net worth remaining at the end of the plan in ${kpis.endYear}.`
             : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The size of the gap is sensitive to contributions, retirement age and planned spending.`;
           const longevity = kpis.depletionAge === null ? "Funded for life" : `Funds to age ${kpis.depletionAge}`;
-          const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
+          const scenarioSuffix = survivorOverlay
+            ? ` — ${survivorOverlay.owner === "client2" ? dfn2 : dfn1} dies age ${survivorOverlay.deathAge}`
+            : ci
+              ? ` — CI · ${ci.owner === "client2" ? dfn2 : dfn1} age ${ci.age}`
+              : stressImpact && stressActive
+                ? ` — ${stressImpact.label}`
+                : "";
+          const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName}{scenarioSuffix} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
           const assetMix = (() => { const by = {}; assets.forEach((a) => { by[a.type] = (by[a.type] || 0) + (Number(a.value) || 0); }); return Object.entries(by).filter(([, v]) => v > 0).map(([type, value]) => ({ type, value, name: TYPE_LABEL[type] })); })();
           const y0 = rows[0] || {}; const inc0 = y0.income || 0; const exp0 = y0.expenditure || 0;
 
@@ -2654,8 +2689,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         {stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.9} isAnimationActive={false} />)}
                         {hasProperty && <Line type="monotone" dataKey="investable" stroke="#7a8493" strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                         {hasDebt && <Line type="monotone" dataKey="netWorth" stroke="#161b22" strokeWidth={1.6} dot={false} isAnimationActive={false} />}
-                        {markers.retC1 && <ReferenceLine x={markers.retC1} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
-                        {markers.retC2 && <ReferenceLine x={markers.retC2} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
+                        {/* Retirement markers: collapse to one line when both retire same year, suppress deceased */}
+                        {markers.retC1 && markers.retC2 && markers.retC1 === markers.retC2
+                          ? <ReferenceLine x={markers.retC1} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />
+                          : (<>
+                            {markers.retC1 && <ReferenceLine x={markers.retC1} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
+                            {markers.retC2 && markers.retC2 !== markers.retC1 && <ReferenceLine x={markers.retC2} stroke="#161b22" strokeDasharray="4 3" strokeOpacity={0.6} />}
+                          </>)
+                        }
                       </ComposedChart>
                   </div>
                   <div className="rep-legend">
@@ -2683,7 +2724,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="rep-legend">
                     <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                     <span><i style={{ background: "#e0a23a" }} /> Drawn from savings</span>
-                    <span><i style={{ background: "#d64545" }} /> Shortfall</span>
+                    {reportCashGap && reportCashGap.uncoveredCount > 0 && <span><i style={{ background: "#d64545" }} /> Shortfall</span>}
                     <span><i className="rep-solid" /> Total spending</span>
                     {hasContrib && <span><i className="rep-dash" /> + savings/contributions</span>}
                   </div>
@@ -2779,14 +2820,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {on("protection") && (protSnap || protGap) && (
                   <section className="report-page">
                     <h2 className="rep-h2">Protection</h2>
-                    {protection.length === 0 && <p className="rep-p rep-lede">No policies are currently recorded — the benchmark below measures the full gap.</p>}
+                    {protection.length === 0
+                      ? <p className="rep-p rep-lede">Policies in force: <b>none</b> — no cover is currently recorded. The benchmark below measures the full gap on that basis.</p>
+                      : <p className="rep-p rep-lede">Policies in force: <b>{protection.length} polic{protection.length === 1 ? "y" : "ies"}</b>{protSnap ? ` — ${Object.entries(protSnap.per).map(([k, v]) => `${insuredLabel(k)}: ${m(v.total)}`).join("; ")}` : ""}.</p>
+                    }
                     {protection.length > 0 && <table className="rep-table">
                       <thead><tr><th>Policy</th><th>Insured</th><th>Type</th><th className="r">Sum assured</th><th className="r">Premium</th><th className="r">Cover to</th></tr></thead>
                       <tbody>{protection.map((p2) => <tr key={p2.id}><td>{p2.name}</td><td>{insuredLabel(p2.insured)}</td><td>{(p2.ptype || "life") === "ci" ? "Critical illness" : "Life"}</td><td className="r num">{m(Number(p2.sumAssured) || 0)}</td><td className="r num">{sym}{(Number(p2.premium) || 0).toLocaleString()}/mo</td><td className="r num">{Number(p2.coverToAge) >= 110 ? "Whole of life" : `Age ${p2.coverToAge}`}</td></tr>)}</tbody>
                     </table>}
-                    {protSnap && Object.entries(protSnap.per).map(([k, v]) => (
-                      <p className="rep-p" key={k}><b>{insuredLabel(k)}:</b> {v.count} polic{v.count === 1 ? "y" : "ies"} totalling {m(v.total)} of cover, costing {sym}{v.prem.toLocaleString()}/month.</p>
-                    ))}
                     {protGap && (<>
                       <h2 className="rep-h2" style={{ marginTop: 22 }}>Protection gap analysis</h2>
                       <table className="rep-table">
@@ -3196,6 +3237,9 @@ const CSS = `
 .rec-bar:hover .qdel,.qdel:focus-visible,.qdel.armed{opacity:1;}
 .qdel:hover{color:var(--red);background:color-mix(in srgb, var(--red) 9%, transparent);}
 .qdel.armed{color:var(--red);background:color-mix(in srgb, var(--red) 12%, transparent);padding:0 7px;}
+.clear-all{opacity:1;min-width:unset;height:22px;padding:0 7px;border:1px solid var(--border);font-size:11px;font-weight:500;}
+.clear-all:hover{color:var(--red);border-color:color-mix(in srgb,var(--red) 50%,transparent);background:color-mix(in srgb,var(--red) 6%,transparent);}
+.clear-all.armed{color:var(--red);border-color:var(--red);background:color-mix(in srgb,var(--red) 10%,transparent);padding:0 7px;}
 .qdel em{font-style:normal;font-size:11px;font-weight:700;}
 @media (hover:none){.qdel{opacity:1;}}
 .chev{transition:transform .18s ease;color:var(--low);flex-shrink:0;}
@@ -3294,6 +3338,7 @@ const CSS = `
 .tip-cmp-delta .num{color:hsl(185 60% 38%);}
 .stress-tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--red);}
 .stress-impact{font-size:12px;color:var(--mid);}
+.stress-note{font-size:11.5px;color:var(--mid);opacity:0.85;display:inline-flex;align-items:center;gap:5px;font-style:italic;}
 .stress-bar .wi-reset{margin-left:auto;}
 .stress-card{text-align:left;border:1px solid var(--border);border-left-width:3px;border-left-color:var(--border);border-radius:10px;padding:12px 14px;background:var(--bg);cursor:pointer;font-family:inherit;width:100%;transition:border-color .12s;}
 .stress-card:hover{border-left-color:var(--red);}
