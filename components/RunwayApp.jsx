@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo, useEffect, useRef, useTransition } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   ComposedChart,
   Area,
@@ -930,6 +930,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [ci, setCi] = useState(null);
   const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000 });
   const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } — mirrors death to chart
+  // Stress / critical-illness / survivor are three mutually-exclusive chart overlays. They MUST never be
+  // active at once, or the headline label and the projected rows read from different scenarios (e.g. a
+  // stale CI label appearing over a lost-decade stress). These helpers are the only sanctioned way to
+  // set one — each clears the other two — so the exclusivity can't be forgotten at a call site.
+  const applyStress = (id) => { setStress(id); setCi(null); setSurvivorOverlay(null); };
+  const applyCi = (draft) => { setCi(draft ? { ...draft } : null); setStress(null); setSurvivorOverlay(null); };
+  const applySurvivor = (ov) => { setSurvivorOverlay(ov); setStress(null); setCi(null); };
+  const clearScenario = () => { setStress(null); setCi(null); setSurvivorOverlay(null); };
   const [annotations, setAnnotations] = useState(seed.annotations || []);
 
   const [profile, setProfile] = useState(seed.profile);
@@ -1620,123 +1628,103 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   }, [reportOpen, reportCfg.anonymous, rows, kpis, reportCashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive, stressImpact, lifetimeTax]);
   const commentaryText = commentaryEdit ?? generatedCommentary;
 
-  // What-if goal solver. Computationally heavy (~150-200 engine calls in worst case) so we:
-  //   1. Gate on the panel/report being open (existing behaviour)
-  //   2. Debounce 280ms so rapid edits don't trigger a cascade per keystroke
-  //   3. Run inside startTransition so React treats it as low-priority and can interrupt for
-  //      urgent updates (chart re-renders, scroll, tooltip hover)
-  //   4. Store the last result in state so the panel stays populated while recomputing
-  const [goal, setGoal] = useState(null);
-  const [goalPending, setGoalPending] = useState(false);
-  const [startGoalTransition, goalTransitioning] = useTransition();
-  const goalDebounce = useRef(null);
-  useEffect(() => {
-    if (!goalOpen && !reportOpen) { setGoal(null); return; }
-    setGoalPending(true);
-    clearTimeout(goalDebounce.current);
-    goalDebounce.current = setTimeout(() => {
-      startGoalTransition(() => {
-        const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
-        const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
-        const fundedNow = funded(base);
-        // Recurring annual spend AT retirement phase (fixed in prior session)
-        const retYearOff = Math.max(0, Math.max(ectx.retC1 - ectx.age0c1, (couple ? ectx.retC2 - ectx.age0c2 : 0)) + 1);
-        const spendAtYear = (off) => {
-          const infl = (Number(assumptions.inflation) || 0) / 100;
-          return expenses.reduce((s, e) => {
-            const amt = Number(e.amount) || 0; if (!amt) return s;
-            const planAge1 = ectx.age0c1 + off;
-            const start = e.start || {}; const end = e.end || {};
-            const startAge = start.mode === "now" ? ectx.age0c1 : start.mode === "retirement" ? ectx.retC1 : Number(start.age) || 0;
-            const endAge = end.mode === "end" ? 999 : end.mode === "retirement" ? ectx.retC1 : end.mode === "now" ? ectx.age0c1 : Number(end.age) || 999;
-            if (planAge1 < startAge || planAge1 >= endAge) return s;
-            const esc = e.escalation === "none" ? 0 : e.escalation === "custom" ? (Number(e.customEsc) || 0) / 100 : infl;
-            const scaled = amt * Math.pow(1 + esc, off);
-            if (e.frequency === "monthly") return s + scaled * 12;
-            if (e.frequency === "annual") return s + scaled;
-            return s;
-          }, 0);
-        };
-        const curSpend = spendAtYear(retYearOff) || spendAtYear(0);
-        const baseInflPct = Number(assumptions.inflation) || 0;
-        const estateAtEnd = (inp) => { const rr = projectCashflow(inp); if (!rr.length) return 0; const ly = rr.length - 1; return Math.max(0, (rr[ly].total - (rr[ly].debt || 0))) / Math.pow(1 + baseInflPct / 100, ly); };
+  // What-if goal solver. Synchronous and memoised: it only runs when the panel or report is open
+  // (the gate below), computes in one pass, and the panel opens instantly with answers — the smooth,
+  // immediate behaviour. (An earlier attempt to defer this with useTransition could be starved and
+  // never commit; synchronous is both simpler and faster for this one-shot-on-open computation.)
+  const goal = useMemo(() => {
+    if (!goalOpen && !reportOpen) return null;
+    const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
+    const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
+    const fundedNow = funded(base);
+    const retYearOff = Math.max(0, Math.max(ectx.retC1 - ectx.age0c1, (couple ? ectx.retC2 - ectx.age0c2 : 0)) + 1);
+    const spendAtYear = (off) => {
+      const infl = (Number(assumptions.inflation) || 0) / 100;
+      return expenses.reduce((s, e) => {
+        const amt = Number(e.amount) || 0; if (!amt) return s;
+        const planAge1 = ectx.age0c1 + off;
+        const start = e.start || {}; const end = e.end || {};
+        const startAge = start.mode === "now" ? ectx.age0c1 : start.mode === "retirement" ? ectx.retC1 : Number(start.age) || 0;
+        const endAge = end.mode === "end" ? 999 : end.mode === "retirement" ? ectx.retC1 : end.mode === "now" ? ectx.age0c1 : Number(end.age) || 999;
+        if (planAge1 < startAge || planAge1 >= endAge) return s;
+        const esc = e.escalation === "none" ? 0 : e.escalation === "custom" ? (Number(e.customEsc) || 0) / 100 : infl;
+        const scaled = amt * Math.pow(1 + esc, off);
+        if (e.frequency === "monthly") return s + scaled * 12;
+        if (e.frequency === "annual") return s + scaled;
+        return s;
+      }, 0);
+    };
+    const curSpend = spendAtYear(retYearOff) || spendAtYear(0);
+    const baseInflPct = Number(assumptions.inflation) || 0;
+    const estateAtEnd = (inp) => { const rr = projectCashflow(inp); if (!rr.length) return 0; const ly = rr.length - 1; return Math.max(0, (rr[ly].total - (rr[ly].debt || 0))) / Math.pow(1 + baseInflPct / 100, ly); };
 
-        // Growth solver
-        const gTest = (g) => funded({ ...base, assets: assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) + g })) });
-        let growth = null, growthCapped = false;
-        if (fundedNow) { if (gTest(-12)) { growth = -12; growthCapped = true; } else { let a = -12, b = 0; for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (gTest(m)) b = m; else a = m; } growth = b; } }
-        else if (gTest(25)) { let a = 0, b = 25; for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (gTest(m)) b = m; else a = m; } growth = b; }
+    // Growth solver
+    const gTest = (g) => funded({ ...base, assets: assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) + g })) });
+    let growth = null, growthCapped = false;
+    if (fundedNow) { if (gTest(-12)) { growth = -12; growthCapped = true; } else { let a = -12, b = 0; for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (gTest(m)) b = m; else a = m; } growth = b; } }
+    else if (gTest(25)) { let a = 0, b = 25; for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (gTest(m)) b = m; else a = m; } growth = b; }
 
-        // Retirement solver — shift only clients who haven't retired yet.
-        // Applying the same delta to a client already past retirement is wrong: their "retirementAge"
-        // would move into the past and have no effect, making the answer look better than it is.
-        const ret1Base = Number(profile.client1.retirementAge) || 0;
-        const ret2Base = Number((profile.client2 || {}).retirementAge) || 0;
-        const ageNow1 = deriveAge(profile.client1.dob);
-        const ageNow2 = couple ? deriveAge((profile.client2 || {}).dob) : null;
-        const c1Working = ageNow1 < ret1Base;
-        const c2Working = couple && ageNow2 != null && ageNow2 < ret2Base;
-        const rTest = (d) => {
-          const p1 = c1Working ? { ...profile.client1, retirementAge: ret1Base + d } : profile.client1;
-          const p2 = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + d } : (profile.client2 || {});
-          return funded({ ...base, profile: { ...profile, client1: p1, ...(couple ? { client2: p2 } : {}) } });
-        };
-        let retire = null;
-        if (!c1Working && !c2Working) { retire = 0; } // both already retired — no lever to pull
-        else if (fundedNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTest(d - 1)) d--; retire = d; }
-        else { let d = 1; while (d <= 25 && !rTest(d)) d++; retire = d <= 25 ? d : null; }
-        const earliestRetAge = retire != null ? ret1Base + retire : null;
-        let retireMargin = null;
-        if (fundedNow && retire != null && retire !== 0) {
-          const p1m = c1Working ? { ...profile.client1, retirementAge: ret1Base + retire } : profile.client1;
-          const p2m = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + retire } : (profile.client2 || {});
-          retireMargin = estateAtEnd({ ...base, profile: { ...profile, client1: p1m, ...(couple ? { client2: p2m } : {}) } });
-        }
+    // Retirement solver — shift only clients who haven't retired yet (Session C accuracy fix).
+    const ret1Base = Number(profile.client1.retirementAge) || 0;
+    const ret2Base = Number((profile.client2 || {}).retirementAge) || 0;
+    const ageNow1 = deriveAge(profile.client1.dob);
+    const ageNow2 = couple ? deriveAge((profile.client2 || {}).dob) : null;
+    const c1Working = ageNow1 < ret1Base;
+    const c2Working = couple && ageNow2 != null && ageNow2 < ret2Base;
+    const rTest = (d) => {
+      const p1 = c1Working ? { ...profile.client1, retirementAge: ret1Base + d } : profile.client1;
+      const p2 = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + d } : (profile.client2 || {});
+      return funded({ ...base, profile: { ...profile, client1: p1, ...(couple ? { client2: p2 } : {}) } });
+    };
+    let retire = null;
+    if (!c1Working && !c2Working) { retire = 0; }
+    else if (fundedNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTest(d - 1)) d--; retire = d; }
+    else { let d = 1; while (d <= 25 && !rTest(d)) d++; retire = d <= 25 ? d : null; }
+    const earliestRetAge = retire != null ? ret1Base + retire : null;
+    let retireMargin = null;
+    if (fundedNow && retire != null && retire !== 0) {
+      const p1m = c1Working ? { ...profile.client1, retirementAge: ret1Base + retire } : profile.client1;
+      const p2m = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + retire } : (profile.client2 || {});
+      retireMargin = estateAtEnd({ ...base, profile: { ...profile, client1: p1m, ...(couple ? { client2: p2m } : {}) } });
+    }
 
-        // Spending solver — only scale recurring lifestyle expenses, not one-offs.
-        // One-off purchases (everyN, oneoff) are fixed commitments; applying a lifestyle-spending
-        // multiplier to school fees or a car replacement distorts the "cut spending" answer.
-        // The figure is expressed against curSpend (retirement-phase recurring only) for consistency.
-        const recurringExp = expenses.filter((e) => e.frequency === "annual" || e.frequency === "monthly");
-        const oneOffExp = expenses.filter((e) => e.frequency !== "annual" && e.frequency !== "monthly");
-        const sTest = (f) => funded({ ...base, expenses: [...recurringExp.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })), ...oneOffExp] });
-        let spend = null;
-        if (fundedNow) { if (sTest(5)) spend = 5; else { let a = 1, b = 5; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; } }
-        else if (sTest(0.1)) { let a = 0.1, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
-        const maxSpend = spend != null && curSpend > 0 ? curSpend * spend : null;
+    // Spending solver — only scale recurring lifestyle expenses, not one-offs (Session C accuracy fix).
+    const recurringExp = expenses.filter((e) => e.frequency === "annual" || e.frequency === "monthly");
+    const oneOffExp = expenses.filter((e) => e.frequency !== "annual" && e.frequency !== "monthly");
+    const sTest = (f) => funded({ ...base, expenses: [...recurringExp.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })), ...oneOffExp] });
+    let spend = null;
+    if (fundedNow) { if (sTest(5)) spend = 5; else { let a = 1, b = 5; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; } }
+    else if (sTest(0.1)) { let a = 0.1, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
+    const maxSpend = spend != null && curSpend > 0 ? curSpend * spend : null;
 
-        const tmpExp = (extra) => ({ ...base, expenses: [...expenses, extra] });
+    const tmpExp = (extra) => ({ ...base, expenses: [...expenses, extra] });
 
-        // One-off purchase solver
-        const liquidPool = assets.filter((a) => (a.type === "cash" || a.type === "investment") && a.drawdown).map((a) => ({ id: a.id, type: a.type, value: Math.max(0, Number(a.value) || 0) }));
-        const liquidToday = liquidPool.reduce((s, a) => s + a.value, 0);
-        const spendLiquid = (L) => { let rem = L; const cut = {}; for (const a of [...liquidPool].sort((x, y) => (x.type === "cash" ? 0 : 1) - (y.type === "cash" ? 0 : 1))) { const take = Math.min(a.value, rem); cut[a.id] = take; rem -= take; if (rem <= 0) break; } return { ...base, assets: assets.map((a) => (cut[a.id] ? { ...a, value: (Number(a.value) || 0) - cut[a.id] } : a)) }; };
-        const stressLiquid = (b) => ({ ...b, assets: b.assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) - 2 })), profile: { ...b.profile, client1: { ...b.profile.client1, lifeExpectancy: Math.max(100, Number(b.profile.client1.lifeExpectancy) || 0) }, client2: { ...b.profile.client2, lifeExpectancy: Math.max(100, Number(b.profile.client2.lifeExpectancy) || 0) } } });
-        const solveLiquid = (test) => { if (liquidToday <= 0 || !test(0)) return 0; if (test(liquidToday)) return liquidToday; let lo = 0, hi = liquidToday; for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (test(mid)) lo = mid; else hi = mid; } return lo; };
-        let oneOff = null;
-        if (fundedNow) { const maxL = solveLiquid((L) => funded(spendLiquid(L))); const safeL = solveLiquid((L) => funded(stressLiquid(spendLiquid(L)))); const aft = projectCashflow(spendLiquid(safeL)); const lastY = Math.max(0, aft.length - 1); const fAft = Math.pow(1 + baseInflPct / 100, lastY); const estateAfter = aft.length ? Math.max(0, (aft[lastY].total - (aft[lastY].debt || 0))) / fAft : 0; oneOff = { liquidToday, safe: safeL, max: maxL, leftover: Math.max(0, liquidToday - safeL), estateAfter }; }
+    // One-off purchase solver
+    const liquidPool = assets.filter((a) => (a.type === "cash" || a.type === "investment") && a.drawdown).map((a) => ({ id: a.id, type: a.type, value: Math.max(0, Number(a.value) || 0) }));
+    const liquidToday = liquidPool.reduce((s, a) => s + a.value, 0);
+    const spendLiquid = (L) => { let rem = L; const cut = {}; for (const a of [...liquidPool].sort((x, y) => (x.type === "cash" ? 0 : 1) - (y.type === "cash" ? 0 : 1))) { const take = Math.min(a.value, rem); cut[a.id] = take; rem -= take; if (rem <= 0) break; } return { ...base, assets: assets.map((a) => (cut[a.id] ? { ...a, value: (Number(a.value) || 0) - cut[a.id] } : a)) }; };
+    const stressLiquid = (b) => ({ ...b, assets: b.assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) - 2 })), profile: { ...b.profile, client1: { ...b.profile.client1, lifeExpectancy: Math.max(100, Number(b.profile.client1.lifeExpectancy) || 0) }, client2: { ...b.profile.client2, lifeExpectancy: Math.max(100, Number(b.profile.client2.lifeExpectancy) || 0) } } });
+    const solveLiquid = (test) => { if (liquidToday <= 0 || !test(0)) return 0; if (test(liquidToday)) return liquidToday; let lo = 0, hi = liquidToday; for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (test(mid)) lo = mid; else hi = mid; } return lo; };
+    let oneOff = null;
+    if (fundedNow) { const maxL = solveLiquid((L) => funded(spendLiquid(L))); const safeL = solveLiquid((L) => funded(stressLiquid(spendLiquid(L)))); const aft = projectCashflow(spendLiquid(safeL)); const lastY = Math.max(0, aft.length - 1); const fAft = Math.pow(1 + baseInflPct / 100, lastY); const estateAfter = aft.length ? Math.max(0, (aft[lastY].total - (aft[lastY].debt || 0))) / fAft : 0; oneOff = { liquidToday, safe: safeL, max: maxL, leftover: Math.max(0, liquidToday - safeL), estateAfter }; }
 
-        // Monthly commitment solver
-        const mTest = (mo) => funded(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
-        let maxMonthly = null;
-        if (fundedNow) { let a = 0, b = 50000; if (mTest(b)) maxMonthly = b; else { for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (mTest(m)) a = m; else b = m; } maxMonthly = a; } }
+    // Monthly commitment solver
+    const mTest = (mo) => funded(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
+    let maxMonthly = null;
+    if (fundedNow) { let a = 0, b = 50000; if (mTest(b)) maxMonthly = b; else { for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (mTest(m)) a = m; else b = m; } maxMonthly = a; } }
 
-        // Resilience + Inflation + Property
-        const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
-        const baseInfl = Number(assumptions.inflation) || 0;
-        const iTest = (extra) => funded({ ...base, assumptions: { ...assumptions, inflation: baseInfl + extra } });
-        let inflMax = null, inflCapped = false;
-        if (fundedNow) { if (iTest(10)) { inflMax = 10; inflCapped = true; } else { let a = 0, b = 10; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (iTest(m)) a = m; else b = m; } inflMax = a; } }
-        const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
-        let propRelease = null;
-        if (propVal > 0) { const released = assets.map((a) => (a.type === "property" ? { ...a, type: "investment", drawdown: true } : a)); const rRows = projectCashflow({ ...base, assets: released }); const rDep = rRows.find((r) => r.shortfall > 0); const lastY = Math.max(0, rRows.length - 1); const fAft = Math.pow(1 + baseInfl / 100, lastY); const rEstate = rRows.length ? Math.max(0, (rRows[lastY].total - (rRows[lastY].debt || 0))) / fAft : 0; const depAge = rDep ? (couple && !rDep.aliveC1 && rDep.aliveC2 ? rDep.c2Age : rDep.c1Age) : null; propRelease = { propVal, nowFunded: !rDep, depAge, estate: rEstate }; }
+    // Resilience + Inflation + Property
+    const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
+    const baseInfl = Number(assumptions.inflation) || 0;
+    const iTest = (extra) => funded({ ...base, assumptions: { ...assumptions, inflation: baseInfl + extra } });
+    let inflMax = null, inflCapped = false;
+    if (fundedNow) { if (iTest(10)) { inflMax = 10; inflCapped = true; } else { let a = 0, b = 10; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (iTest(m)) a = m; else b = m; } inflMax = a; } }
+    const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
+    let propRelease = null;
+    if (propVal > 0) { const released = assets.map((a) => (a.type === "property" ? { ...a, type: "investment", drawdown: true } : a)); const rRows = projectCashflow({ ...base, assets: released }); const rDep = rRows.find((r) => r.shortfall > 0); const lastY = Math.max(0, rRows.length - 1); const fAft = Math.pow(1 + baseInfl / 100, lastY); const rEstate = rRows.length ? Math.max(0, (rRows[lastY].total - (rRows[lastY].debt || 0))) / fAft : 0; const depAge = rDep ? (couple && !rDep.aliveC1 && rDep.aliveC2 ? rDep.c2Age : rDep.c1Age) : null; propRelease = { propVal, nowFunded: !rDep, depAge, estate: rEstate }; }
 
-        setGoal({ fundedNow, growth, growthCapped, retire, retireMargin, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear });
-        setGoalPending(false);
-      });
-    }, 280);
-    return () => clearTimeout(goalDebounce.current);
-  }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis, ectx, couple]); // eslint-disable-line react-hooks/exhaustive-deps
+    return { fundedNow, growth, growthCapped, retire, retireMargin, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
+  }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis, ectx, couple]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
   const rmFn = (setter) => (id) => { setter((prev) => prev.filter((x) => x.id !== id)); setOpen((s) => { const n = new Set(s); n.delete(id); return n; }); };
@@ -2305,7 +2293,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                               <div className="pg-row pg-verdict pg-gap"><span>Survivor's plan runs short from {sv.firstShortYear}</span><span className="num">−{fmtFull(sv.totalShortReal, cur)} total</span></div>
                               <div className="pg-row pg-close"><span>Additional cover that closes the gap</span><span className="num">{sv.closeGap === Infinity ? "Beyond " + fmtFull(20000000, cur) : "~" + fmtFull(Math.ceil(sv.closeGap / 10000) * 10000, cur)}</span></div>
                             </>)}
-                        {(() => { const isActive = survivorOverlay && survivorOverlay.owner === sv.k && survivorOverlay.deathAge === sv.dAge; return isActive ? (<button className="pg-chart-btn pg-chart-btn-on" onClick={() => setSurvivorOverlay(null)}>× Clear from chart</button>) : (<button className="pg-chart-btn" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay({ owner: sv.k, deathAge: sv.dAge }); }}>↗ Show on chart</button>); })()}
+                        {(() => { const isActive = survivorOverlay && survivorOverlay.owner === sv.k && survivorOverlay.deathAge === sv.dAge; return isActive ? (<button className="pg-chart-btn pg-chart-btn-on" onClick={() => setSurvivorOverlay(null)}>× Clear from chart</button>) : (<button className="pg-chart-btn" onClick={() => applySurvivor({ owner: sv.k, deathAge: sv.dAge })}>↗ Show on chart</button>); })()}
                           </div>
                         ))}
                         <span className="field-note">Shortfall totals are in today's money. "Closes the gap" is the smallest lump sum at death under which no year shows a shortfall — an analysis of this plan, not a recommendation.</span>
@@ -2396,7 +2384,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <span className="stress-tag"><AlertTriangle size={12} /> {stressImpact.label}</span>
                 <span className="stress-impact">{stressImpact.stressAge ? `funds run short at ${stressImpact.stressAge}` : "still funded for life"}{stressImpact.baseAge !== stressImpact.stressAge ? ` · base ${stressImpact.baseAge ?? "fully funded"}` : ""}</span>
                 {stress && stressCfg.timing === "retirement" && stressById(stress)?.timingable && <span className="stress-impact" style={{opacity:0.7}}>· pot at retirement shows pre-shock value — impact visible in subsequent years</span>}
-                <button className="wi-reset" onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear</button>
+                <button className="wi-reset" onClick={clearScenario}>Clear</button>
               </div>
             )}
             {survivorOverlay && survivorSummary && (() => {
@@ -2526,17 +2514,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             </div>
           )}
         </main>
-        {goalOpen && (() => {
-          // Show a loading placeholder while the first result is computing
-          if (!goal) return (
-            <div className="modal-scrim" onClick={() => setGoalOpen(false)}>
-              <div className="modal" onClick={(e) => e.stopPropagation()}>
-                <div className="modal-head"><div><div className="modal-title">What if I asked…</div><div className="modal-sub">Computing answers…</div></div><button className="icon-btn" onClick={() => setGoalOpen(false)}><XCircle size={18} /></button></div>
-                <div className="goal-loading"><div className="goal-loading-bar" /></div>
-              </div>
-            </div>
-          );
-          return (() => {
+        {goalOpen && goal && (() => {
           const ret1 = Number(profile.client1.retirementAge) || 0;
           const m = (v) => fmtFull(v, cur);
           const cards = [];
@@ -2618,7 +2596,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             <div className="modal-scrim" onClick={() => setGoalOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-head">
-                  <div><div className="modal-title">What if I asked… <span style={{fontSize:"0.68rem",textTransform:"uppercase",letterSpacing:"0.05em",color:"var(--mid)",opacity:0.7,fontWeight:600,marginLeft:6}}>Full lifetime simulation</span>{(goalPending || goalTransitioning) && <span className="goal-recalc">Updating…</span>}</div><div className="modal-sub">{goal.fundedNow ? "This plan is fully funded. Here's what the client can ask — and the answer the numbers give." : "This plan runs short. Here's what the client tends to ask — and what would close the gap."}</div></div>
+                  <div><div className="modal-title">What if I asked… <span style={{fontSize:"0.68rem",textTransform:"uppercase",letterSpacing:"0.05em",color:"var(--mid)",opacity:0.7,fontWeight:600,marginLeft:6}}>Full lifetime simulation</span></div><div className="modal-sub">{goal.fundedNow ? "This plan is fully funded. Here's what the client can ask — and the answer the numbers give." : "This plan runs short. Here's what the client tends to ask — and what would close the gap."}</div></div>
                   <button className="icon-btn" onClick={() => setGoalOpen(false)}><XCircle size={18} /></button>
                 </div>
                 <div className="goal-cards">
@@ -2634,7 +2612,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               </div>
             </div>
           );
-          })();
         })()}
         {stressOpen && (
           <div className="modal-scrim" onClick={() => setStressOpen(false)}>
@@ -2646,7 +2623,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               {(stress || ci) && stressImpact && (
                 <div className="active-overlay">
                   <span><AlertTriangle size={13} /> Active: {stressImpact.label}</span>
-                  <button onClick={() => { setStress(null); setCi(null); setSurvivorOverlay(null); }}>Clear overlay</button>
+                  <button onClick={clearScenario}>Clear overlay</button>
                 </div>
               )}
               {[
@@ -2658,7 +2635,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="stress-group-head">{grp.title}<span>{grp.note}</span></div>
                   <div className="goal-cards">
                     {STRESS_SCENARIOS.filter((s) => s.group === grp.key).map((s) => (
-                      <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { setStress(s.id); setCi(null); setSurvivorOverlay(null); } }}>
+                      <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { applyStress(s.id); } }}>
                         <div className="goal-card-head"><AlertTriangle size={14} /> {s.label}</div>
                         <div className="goal-card-text">{s.short}</div>
                       </button>
@@ -2723,13 +2700,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </div>
                 {(() => { const ciCover = protection.filter((p) => (p.ptype || "life") === "ci" && (p.insured || "client1") === ciDraft.owner && (Number(p.coverToAge) || 0) >= (Number(ciDraft.age) || 0)).reduce((s2, p) => s2 + (Number(p.sumAssured) || 0), 0); return ciCover > 0 && Number(ciDraft.amount) !== ciCover ? <div className="ci-hint">CI cover in force at that age: <b className="num">{fmtFull(ciCover, cur)}</b> <button className="xc-btn" onClick={() => setCiDraft((d) => ({ ...d, amount: ciCover }))}>Use</button></div> : null; })()}
                 <div className="ci-actions">
-                  <button className="ci-apply" onClick={() => { setCi({ ...ciDraft }); setStress(null); setSurvivorOverlay(null); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
+                  <button className="ci-apply" onClick={() => { applyCi(ciDraft); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
                   {ci && <button className="ci-clear" onClick={() => setCi(null)}>Clear</button>}
                 </div>
               </div>
               <div className="modal-foot">
                 {(stress || ci)
-                  ? <div className="stress-foot-actions"><button className="wi-reset" onClick={() => { setStress(null); setCi(null); setStressOpen(false); }}>Clear stress test</button><button className="goal-btn" onClick={() => setStressOpen(false)}>↗ Show on chart</button></div>
+                  ? <div className="stress-foot-actions"><button className="wi-reset" onClick={() => { clearScenario(); setStressOpen(false); }}>Clear stress test</button><button className="goal-btn" onClick={() => setStressOpen(false)}>↗ Show on chart</button></div>
                   : "The base plan is unchanged — this only overlays a comparison line so you can show the client the plan still holds (or where it doesn't)."}
               </div>
             </div>
