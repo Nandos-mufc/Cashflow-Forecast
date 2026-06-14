@@ -3151,6 +3151,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     </section>
                   );
                 })()}
+
+                {/* Protection snapshot */}
+                {on("protection") && (protSnap || protGap) && (
                   <section className="report-page">
                     <h2 className="rep-h2">Protection</h2>
                     {protection.length === 0
