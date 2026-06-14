@@ -3172,9 +3172,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         </tbody>
                       </table>
                       <p className="rep-p rep-small">Benchmarks are a rule-of-thumb starting point ({protMult.life}× income for life cover, {protMult.ci}× for critical illness; joint income split equally). They are not a needs analysis.</p>
-                      {protGap.survivor && protGap.survivor.map((sv) => (
-                        <p className="rep-p" key={sv.k}>If {sv.k === "client2" ? dfn2 : dfn1} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor's plan {sv.funded ? "remains funded to the end of the projection" : `runs short from ${sv.firstShortYear}`}{!sv.funded ? <> by <b className="rep-gap-fig">{m(sv.totalShortReal)}</b> in total (today's money) — additional cover of <b className="rep-gap-fig">{sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)}</b> at death would close the gap</> : null}.</p>
-                      ))}
+                      {protGap.survivor && protGap.survivor.map((sv) => {
+                        const svName = sv.k === "client2" ? dfn2 : dfn1;
+                        return (
+                          <p className="rep-p" key={sv.k}>
+                            If {svName} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor&apos;s plan{" "}
+                            {sv.funded
+                              ? "remains funded to the end of the projection"
+                              : <>runs short from {sv.firstShortYear} by <b className="rep-gap-fig">{m(sv.totalShortReal)}</b> in total (today&apos;s money){" "}&#8212; additional cover of{" "}<b className="rep-gap-fig">{sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)}</b> at death would close the gap</>
+                            }.
+                          </p>
+                        );
+                      })}
                     </>)}
                     {protSnap && protSnap.firstDeath && (
                       <p className="rep-p">{protSnap.firstDeath.payout > 0
