@@ -119,7 +119,22 @@ const taxDefault = () => ({
   enabled: false,
   cgtRate: 0,
   periods: [{ id: uid(), label: "Tax-free", startMode: "now", startAge: 0, personalAllowance: 0, bands: [] }],
+  estate: { enabled: false, nrb: 0, rnrb: 0, rate: 40, transferableNrb: true },
 });
+// Estate / succession tax — deliberately simplified for illustration. Flat allowance + single rate
+// above it; no RNRB taper on large estates, no lifetime-gift history, no business/agricultural relief.
+// Couples: models the SECOND death only (spouse transfers are typically exempt), with an optional
+// transferable allowance so the survivor's estate carries both nil-rate bands.
+function computeEstate(grossEstate, est, isCouple) {
+  const gross = Math.max(0, Number(grossEstate) || 0);
+  if (!est || !est.enabled) return { gross, allowance: 0, taxable: 0, tax: 0, net: gross, applied: false };
+  const baseAllow = (Number(est.nrb) || 0) + (Number(est.rnrb) || 0);
+  const allowance = isCouple && est.transferableNrb !== false ? baseAllow * 2 : baseAllow;
+  const rate = Math.min(100, Math.max(0, Number(est.rate) || 0)) / 100;
+  const taxable = Math.max(0, gross - allowance);
+  const tax = taxable * rate;
+  return { gross, allowance, taxable, tax, net: gross - tax, applied: true };
+}
 // Starting points only — the adviser verifies and edits the current rates. Not a maintained library.
 const TAX_PRESETS = {
   none: { personalAllowance: 0, bands: [] },
@@ -1776,7 +1791,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const rmAnnotation = (id) => setAnnotations((a) => a.filter((x) => x.id !== id));
 
   const tax = assumptions.tax || taxDefault();
+  const est = tax.estate || { enabled: false, nrb: 0, rnrb: 0, rate: 40, transferableNrb: true };
   const setTax = (p) => setAssumptions((a) => ({ ...a, tax: { ...(a.tax || taxDefault()), ...p } }));
+  const setEstate = (p) => setTax({ estate: { ...est, ...p } });
   const upPeriod = (id, p) => setTax({ periods: tax.periods.map((x) => (x.id === id ? { ...x, ...p } : x)) });
   const addPeriod = () => setTax({ periods: [...tax.periods, { id: uid(), label: "New jurisdiction", startMode: "age", startAge: Math.max(ectx.age0c1 + 1, 65), personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] }] });
   const rmPeriod = (id) => setTax({ periods: tax.periods.filter((x) => x.id !== id) });
@@ -2127,6 +2144,28 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <p className="tax-disclaimer">Tax figures are illustrative estimates based on the assumptions you set above. They are not tax advice and should not be relied upon — tax treatment depends on individual circumstances and changes over time.</p>
                   </>
                 )}
+                <div className="estate-block">
+                  <div className="tax-enable estate-enable">
+                    <div><div className="tax-enable-title">Estate &amp; succession tax</div><div className="tax-enable-sub">Off by default. Models a one-off tax on the estate at the end of the plan — UK inheritance tax, or any jurisdiction's succession duty. Independent of the income tax above.</div></div>
+                    <Toggle on={est.enabled} onClick={() => setEstate({ enabled: !est.enabled })} />
+                  </div>
+                  {est.enabled && (<>
+                    <div className="tax-presets"><span>Preset:</span><button onClick={() => setEstate({ nrb: 325000, rnrb: 175000, rate: 40, transferableNrb: true })}>UK IHT 2025/26</button><button onClick={() => setEstate({ nrb: 0, rnrb: 0, rate: 0 })}>Clear</button></div>
+                    <div className="field"><label>Tax-free allowance (nil-rate band)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.nrb} step={5000} onCommit={(v) => setEstate({ nrb: v })} /></div><span className="field-note">The amount passing free of tax. The UK nil-rate band is {sym}325,000.</span></div>
+                    <div className="field"><label>Residence allowance (optional)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.rnrb} step={5000} onCommit={(v) => setEstate({ rnrb: v })} /></div><span className="field-note">UK residence nil-rate band ({sym}175,000) where a main home passes to direct descendants. Leave at 0 if it doesn't apply.</span></div>
+                    <div className="field"><label>Tax rate above the allowance</label><Mini value={est.rate} suffix="%" onChange={(v) => setEstate({ rate: Math.min(100, Math.max(0, Number(v) || 0)) })} /></div>
+                    {couple && <div className="rec-field rec-toggle"><label>Transferable allowance on second death <InfoTip text="On the first death, assets passing to a spouse are normally exempt and that partner's unused allowance transfers. With this on, the survivor's estate carries both partners' allowances (and residence allowances). This models the second death only — the point at which the tax usually falls due." /></label><Toggle on={est.transferableNrb !== false} onClick={() => setEstate({ transferableNrb: !(est.transferableNrb !== false) })} /></div>}
+                    {(() => { const ec = computeEstate(kpis.endVal, est, couple); return (
+                      <div className="estate-preview">
+                        <div className="estate-prev-row"><span>Projected estate at plan end ({kpis.endYear})</span><b className="num">{fmtFull(ec.gross, cur)}</b></div>
+                        <div className="estate-prev-row"><span>Tax-free allowance{couple && est.transferableNrb !== false ? " (both partners)" : ""}</span><b className="num">{fmtFull(ec.allowance, cur)}</b></div>
+                        <div className="estate-prev-row estate-prev-tax"><span>Estimated tax</span><b className="num">{ec.tax > 0 ? "−" : ""}{fmtFull(ec.tax, cur)}</b></div>
+                        <div className="estate-prev-row estate-prev-net"><span>Net to beneficiaries</span><b className="num">{fmtFull(ec.net, cur)}</b></div>
+                      </div>
+                    ); })()}
+                    <p className="tax-disclaimer">A simplified illustration: a flat allowance and single rate on the end-of-plan estate, in today's money. It does not model allowance taper on large estates, lifetime gifts, trusts, or business and agricultural relief. Not tax or estate-planning advice.</p>
+                  </>)}
+                </div>
               </div>
             )}
             {section === "assets" && (
@@ -2644,7 +2683,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           }
 
           // ALWAYS SHOWN
-          cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end of the plan (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.`, note: "In today's money (real terms). Before inheritance tax or estate costs. Based on current assumptions with no changes — actual estate will depend on actual returns and spending." });
+          {
+            const ec = computeEstate(goal.estateEnd, est, couple);
+            if (ec.applied) {
+              cards.push({ Icon: Landmark, verdict: "info", q: "What will I leave behind?", text: <>The projected estate at the end of the plan ({goal.estateEndYear}) is about <b>{m(ec.gross)}</b>{hasProperty ? ", including any property still held" : ""}. After a tax-free allowance of {m(ec.allowance)}{couple && est.transferableNrb !== false ? " (both partners' allowances combined)" : ""}, estimated succession tax is about <b>{m(ec.tax)}</b>, leaving roughly <b>{m(ec.net)}</b> to beneficiaries.</>, note: "In today's money, before any funeral or administration costs. A simplified flat-allowance, single-rate illustration set in Tax & Jurisdiction — it ignores allowance taper, lifetime gifts, trusts and reliefs. Not estate-planning advice." });
+            } else {
+              cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end of the plan (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.`, note: "In today's money (real terms). Before any inheritance or succession tax — switch on Estate & succession tax in Tax & Jurisdiction to estimate that. Based on current assumptions with no changes." });
+            }
+          }
           cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — longevity is a real risk worth planning for.", note: "All inputs unchanged. Spending and growth rates are held constant to age 100, which may overstate costs (older retirees often spend less) or understate them (long-term care). Consider this a conservative longevity stress test." });
 
           // PROPERTY AS A BACKSTOP — only when property is held and currently treated as non-spendable.
@@ -3685,6 +3731,14 @@ const CSS = `
 .add-btn{display:flex;align-items:center;gap:5px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--border);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;}
 .add-btn.wide{width:100%;justify-content:center;padding:9px;margin-top:4px;}
 .tax-enable{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:13px 14px;margin-bottom:4px;}
+.estate-block{margin-top:18px;border-top:1px solid var(--border);padding-top:16px;}
+.estate-enable{margin-top:0;}
+.estate-preview{margin-top:12px;border:1px solid var(--border);border-radius:11px;overflow:hidden;background:var(--card);}
+.estate-prev-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 13px;font-size:12.5px;color:var(--mid);border-bottom:1px solid var(--border);}
+.estate-prev-row b{color:var(--ink);font-variant-numeric:tabular-nums;}
+.estate-prev-tax b{color:var(--red);}
+.estate-prev-net{border-bottom:none;background:color-mix(in srgb, var(--accent) 6%, transparent);}
+.estate-prev-net span,.estate-prev-net b{color:var(--ink);font-weight:650;}
 .tax-enable-title{font-size:13px;font-weight:600;color:var(--ink);}
 .tax-enable-sub{font-size:11.5px;color:var(--low);line-height:1.45;margin-top:4px;}
 .tax-tl-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--ink);letter-spacing:.02em;margin-top:4px;}
