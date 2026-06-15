@@ -2951,8 +2951,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {endF && (
                       <div className="mc-goals">
                         <div className="mc-goal"><span className="mc-goal-q">Income goal — never run out</span><b className={`mc-goal-a mc-goal-${pill}`}>{Math.round(prob)}% of futures</b></div>
-                        <div className="mc-goal"><span className="mc-goal-q">Legacy — left at plan end in a typical future</span><b className="mc-goal-a">{m(d0(endF.p50, endF.y))}</b></div>
-                        <div className="mc-goal"><span className="mc-goal-q">Legacy — in a poor run (worst 1 in 10)</span><b className="mc-goal-a">{m(d0(endF.p10, endF.y))}</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Legacy — left at plan end in a typical future</span><b className="mc-goal-a">{fmtFull(d0(endF.p50, endF.y), cur)}</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Legacy — in a poor run (worst 1 in 10)</span><b className="mc-goal-a">{fmtFull(d0(endF.p10, endF.y), cur)}</b></div>
                       </div>
                     )}
 
