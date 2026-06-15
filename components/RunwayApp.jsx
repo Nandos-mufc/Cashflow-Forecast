@@ -2696,19 +2696,25 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         {goalOpen && goal && (() => {
           const ret1 = Number(profile.client1.retirementAge) || 0;
           const m = (v) => fmtFull(v, cur);
+          const smile = (assumptions.spendingPattern || {}).mode === "smile";
+          // The solvers run through projectCashflow with the full assumptions, so they already apply the
+          // retirement smile when it's on. The note must say so, rather than claiming flat spending.
+          const spendBasisNote = smile
+            ? "Spending follows your retirement-smile pattern — lifestyle (discretionary) spend eases in later retirement, which the solver applies. Essentials are unchanged."
+            : "Spending is assumed constant over time — if you'd naturally cut back in later retirement, the true figure is more favourable.";
           const cards = [];
 
           if (goal.fundedNow) {
             // SPENDING
             const pctMore = goal.spend != null ? ((goal.spend - 1) * 100).toFixed(1) : null;
             if (goal.maxSpend != null && goal.curSpend > 0)
-              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && parseFloat(pctMore) < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.`, note: "Single-lever answer: all other inputs (retirement age, growth rates, contributions) are held constant. Spending is assumed constant over time — if you'd naturally cut back in later retirement, the true ceiling is higher." });
+              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && parseFloat(pctMore) < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.`, note: `Single-lever answer: all other inputs (retirement age, growth rates, contributions) are held constant. ${spendBasisNote}` });
             else
               cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Spending could rise by about ${pctMore}% and the plan would still last for life.`, note: "All other inputs held constant." });
 
             // RETIREMENT
             if (goal.retire != null && goal.retire < 0)
-              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life${goal.retireMargin != null && goal.retireMargin > 0 ? `, leaving about ${m(goal.retireMargin)} at plan end` : ""}.`, note: `Assumes spending stays at today's level through retirement (no lifestyle reduction). Income sources (salary ending, pensions starting) follow your plan exactly as entered. The estate figure is the margin of safety behind this answer — it's what differentiates an answer that's comfortably affordable from one that only just works.` });
+              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life${goal.retireMargin != null && goal.retireMargin > 0 ? `, leaving about ${m(goal.retireMargin)} at plan end` : ""}.`, note: `${smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending stays at today's level through retirement (no lifestyle reduction)."} Income sources (salary ending, pensions starting) follow your plan exactly as entered. The estate figure is the margin of safety behind this answer — it's what differentiates an answer that's comfortably affordable from one that only just works.` });
             else
               cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works given current spending and assets.`, note: "Assumes spending stays unchanged in retirement. If retirement costs are lower, an earlier date may be feasible." });
 
@@ -2747,7 +2753,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               cards.push({ Icon: Receipt, verdict: "no", q: "How much would I need to cut spending?", text: "The plan can't be funded even on a much-reduced budget — the income and asset base is the constraint.", note: "This points to an income or asset shortfall, not a spending problem." });
 
             if (goal.retire != null)
-              cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `Between ${goal.retire} and ${goal.retire + 1} more year${goal.retire + 1 === 1 ? "" : "s"}${couple ? " each" : ` (retire somewhere between ${ret1 + goal.retire} and ${ret1 + goal.retire + 1})`} fully funds the plan.`, note: "Assumes spending unchanged through retirement. Working longer adds income and delays drawdown — both help. If only one partner works, the gain is proportionally smaller. The solver works in whole years — the true answer sits within this range." });
+              cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `Between ${goal.retire} and ${goal.retire + 1} more year${goal.retire + 1 === 1 ? "" : "s"}${couple ? " each" : ` (retire somewhere between ${ret1 + goal.retire} and ${ret1 + goal.retire + 1})`} fully funds the plan.`, note: `${smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending unchanged through retirement."} Working longer adds income and delays drawdown — both help. If only one partner works, the gain is proportionally smaller. The solver works in whole years — the true answer sits within this range.` });
             else
               cards.push({ Icon: User, verdict: "no", q: "Would working longer fix it?", text: "Working longer alone doesn't close the gap within 25 years — it needs combining with lower spending or higher returns.", note: "The structural gap is too large for additional working years alone to resolve." });
 
@@ -2951,8 +2957,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {endF && (
                       <div className="mc-goals">
                         <div className="mc-goal"><span className="mc-goal-q">Income goal — never run out</span><b className={`mc-goal-a mc-goal-${pill}`}>{Math.round(prob)}% of futures</b></div>
-                        <div className="mc-goal"><span className="mc-goal-q">Legacy — left at plan end in a typical future</span><b className="mc-goal-a">{fmtFull(d0(endF.p50, endF.y), cur)}</b></div>
-                        <div className="mc-goal"><span className="mc-goal-q">Legacy — in a poor run (worst 1 in 10)</span><b className="mc-goal-a">{fmtFull(d0(endF.p10, endF.y), cur)}</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Spendable assets left — typical future <InfoTip text="The median across all simulated futures of spendable assets at the end of the plan. Excludes property and is before any estate tax, so it differs from the 'What will I leave behind?' estate figure, which includes property and applies succession tax." /></span><b className="mc-goal-a">{fmtFull(d0(endF.p50, endF.y), cur)}</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Spendable assets left — poor run (worst 1 in 10)</span><b className="mc-goal-a">{fmtFull(d0(endF.p10, endF.y), cur)}</b></div>
                       </div>
                     )}
 
@@ -3031,7 +3037,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
             { id: "inputs", label: "Detailed inputs", },
             { id: "assumptions", label: "Assumptions" },
-            { id: "taxov", label: "Tax overview", off: !(assumptions.tax && assumptions.tax.enabled), why: "tax not applied to this plan" },
+            { id: "taxov", label: "Tax overview", off: !((assumptions.tax && assumptions.tax.enabled) || (assumptions.tax && assumptions.tax.estate && assumptions.tax.estate.enabled)), why: "no tax applied to this plan" },
             { id: "commentary", label: "Commentary" },
           ];
           const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
@@ -3602,24 +3608,39 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 )}
 
                 {/* Tax overview */}
-                {on("taxov") && assumptions.tax && assumptions.tax.enabled && (
+                {on("taxov") && ((assumptions.tax && assumptions.tax.enabled) || est.enabled) && (
                   <section className="report-page">
                     <h2 className="rep-h2">Tax overview</h2>
-                    <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income entered in the plan is treated as net; tax applies to pension withdrawals, investment drawdown and offshore-bond gains.</p>
-                    <table className="rep-table">
-                      <thead><tr><th>Residence period</th><th>From</th><th className="r">Tax-free allowance</th><th className="r">Bands</th></tr></thead>
-                      <tbody>
-                        {assumptions.tax.periods.map((p2, i) => (
-                          <tr key={p2.id}><td>{p2.label || "Period " + (i + 1)}</td><td>{i === 0 || p2.startMode === "now" ? "Start of plan" : `Age ${p2.startAge} (≈${baseYear + Math.max(0, Math.round((Number(p2.startAge) || 0) - ectx.age0c1))})`}</td><td className="r num">{m(Number(p2.personalAllowance) || 0)}</td><td className="r num">{p2.bands.length === 0 ? "No income tax" : p2.bands.map((b) => `${b.rate}%${b.upTo ? ` to ${fmtCompact(Number(b.upTo), cur)}` : "+"}`).join(" · ")}</td></tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <table className="rep-table" style={{ marginTop: 14 }}>
-                      <tbody>
-                        <tr><td>CGT on investment withdrawals</td><td className="r num">{Number(assumptions.tax.cgtRate) || 0}%</td></tr>
-                        <tr><td><b>Lifetime tax over the plan</b></td><td className="r num"><b>{m(lifetimeTax)}</b></td></tr>
-                      </tbody>
-                    </table>
+                    {assumptions.tax && assumptions.tax.enabled && (<>
+                      <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income entered in the plan is treated as net; tax applies to pension withdrawals, investment drawdown and offshore-bond gains.</p>
+                      <table className="rep-table">
+                        <thead><tr><th>Residence period</th><th>From</th><th className="r">Tax-free allowance</th><th className="r">Bands</th></tr></thead>
+                        <tbody>
+                          {assumptions.tax.periods.map((p2, i) => (
+                            <tr key={p2.id}><td>{p2.label || "Period " + (i + 1)}</td><td>{i === 0 || p2.startMode === "now" ? "Start of plan" : `Age ${p2.startAge} (≈${baseYear + Math.max(0, Math.round((Number(p2.startAge) || 0) - ectx.age0c1))})`}</td><td className="r num">{m(Number(p2.personalAllowance) || 0)}</td><td className="r num">{p2.bands.length === 0 ? "No income tax" : p2.bands.map((b) => `${b.rate}%${b.upTo ? ` to ${fmtCompact(Number(b.upTo), cur)}` : "+"}`).join(" · ")}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <table className="rep-table" style={{ marginTop: 14 }}>
+                        <tbody>
+                          <tr><td>CGT on investment withdrawals</td><td className="r num">{Number(assumptions.tax.cgtRate) || 0}%</td></tr>
+                          <tr><td><b>Lifetime tax over the plan</b></td><td className="r num"><b>{m(lifetimeTax)}</b></td></tr>
+                        </tbody>
+                      </table>
+                    </>)}
+                    {est.enabled && (() => { const ec = computeEstate(goal ? goal.estateEnd : kpis.endVal, est, couple); return (<>
+                      <h3 className="rep-h3" style={{ marginTop: assumptions.tax && assumptions.tax.enabled ? 22 : 0 }}>Estate &amp; succession tax</h3>
+                      <p className="rep-p rep-lede">An illustrative one-off tax on the estate at the end of the plan ({goal ? goal.estateEndYear : kpis.endYear}), in today's money.</p>
+                      <table className="rep-table">
+                        <tbody>
+                          <tr><td>Projected estate at plan end</td><td className="r num">{m(ec.gross)}</td></tr>
+                          <tr><td>Tax-free allowance{couple && est.transferableNrb !== false ? " (both partners combined)" : ""}</td><td className="r num">{m(ec.allowance)}</td></tr>
+                          <tr><td>Estimated succession tax{Number(est.rate) ? ` (at ${Number(est.rate)}%)` : ""}</td><td className="r num">{ec.tax > 0 ? "−" : ""}{m(ec.tax)}</td></tr>
+                          <tr><td><b>Net to beneficiaries</b></td><td className="r num"><b>{m(ec.net)}</b></td></tr>
+                        </tbody>
+                      </table>
+                      <p className="rep-p rep-small">A simplified flat-allowance, single-rate illustration. It does not model allowance taper on large estates, lifetime gifts, trusts, or business and agricultural relief, and assumes the whole estate is within scope of this tax. Not estate-planning advice.</p>
+                    </>); })()}
                     <p className="rep-p rep-small">Tax figures are illustrative estimates based on user-defined assumptions and should not be relied upon as tax advice. Tax treatment depends on individual circumstances and the rules of each jurisdiction, which change over time. Advice should be obtained from a qualified tax specialist.</p>
                     <RepFoot />
                   </section>
@@ -4193,6 +4214,7 @@ const CSS = `
 .rep-h1{font-family:"Fraunces",Georgia,serif;font-size:34px;font-weight:600;margin:10px 0 6px;letter-spacing:-.01em;}
 .rep-meta{font-size:12.5px;color:#7a8493;}
 .rep-h2{font-family:"Fraunces",Georgia,serif;font-size:19px;font-weight:600;margin:0 0 4px;}
+.rep-h3{font-family:"Fraunces",Georgia,serif;font-size:15px;font-weight:600;margin:0 0 4px;}
 .rep-p{font-size:12.5px;color:#5b6573;margin:0 0 14px;line-height:1.5;}
 .rep-verdict{border-radius:11px;padding:16px 18px;margin-bottom:22px;border:1px solid;}
 .rep-verdict-tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;}
