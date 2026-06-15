@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import {
   ComposedChart,
   Area,
@@ -770,27 +770,66 @@ const THEMES = {
 /* ================================================================== */
 /*  FIELD PRIMITIVES                                                  */
 /* ================================================================== */
-function NumberInput({ value, onCommit, className = "", step = 1, min }) {
+// Coalesces a stream of rapid values (e.g. a slider drag) to at most one
+// commit per animation frame, so the chart tracks the thumb at refresh rate
+// instead of firing a full reactive cycle on every pixel.
+function useRafThrottle(fn) {
+  const fnRef = useRef(fn); fnRef.current = fn;
+  const pending = useRef(null); const raf = useRef(0);
+  useEffect(() => () => { if (raf.current) cancelAnimationFrame(raf.current); }, []);
+  return useCallback((v) => {
+    pending.current = v;
+    if (raf.current) return;
+    raf.current = requestAnimationFrame(() => { raf.current = 0; fnRef.current(pending.current); });
+  }, []);
+}
+// Number field that stays instantly responsive while typing (local text state)
+// but commits upward only after a short idle, so a value like "300000" triggers
+// one reactive cycle instead of six. Commits immediately on blur or Enter.
+function NumberInput({ value, onCommit, className = "", step = 1, min, commitDelay = 140 }) {
   const [txt, setTxt] = useState(value === "" || value == null ? "" : String(value));
   const focused = useRef(false);
+  const timer = useRef(null);
+  const pending = useRef(null);
   useEffect(() => {
     if (!focused.current) {
       const cur = txt === "" ? null : Number(txt);
       if (cur !== Number(value)) setTxt(value === "" || value == null ? "" : String(value));
     }
   }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const flush = () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    if (pending.current !== null) { onCommit(pending.current); pending.current = null; }
+  };
   return (
     <input
       type="number" className={`num ${className}`} value={txt} step={step} min={min}
       onFocus={(e) => { focused.current = true; e.target.select(); }}
-      onChange={(e) => { setTxt(e.target.value); onCommit(e.target.value === "" ? 0 : Number(e.target.value)); }}
-      onBlur={() => { focused.current = false; setTxt(value === "" || value == null ? "0" : String(value)); }}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setTxt(raw);
+        pending.current = raw === "" ? 0 : Number(raw);
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => { timer.current = null; if (pending.current !== null) { onCommit(pending.current); pending.current = null; } }, commitDelay);
+      }}
+      onKeyDown={(e) => { if (e.key === "Enter") flush(); }}
+      onBlur={() => { focused.current = false; flush(); if (txt === "") setTxt("0"); }}
     />
   );
 }
 const Money = ({ value, onChange, symbol }) => (
   <div className="money"><span className="money-sym">{symbol}</span><NumberInput value={value} step={1000} min={0} className="money-in" onCommit={onChange} /></div>
 );
+// Range slider with an instantly-responsive thumb (local state) whose upward commit is
+// coalesced to one update per frame — keeps live-drag smooth even when the commit drives
+// an expensive recompute (e.g. the survivor solver).
+function RangeInput({ value, min, max, step = 1, onChange, ...rest }) {
+  const [local, setLocal] = useState(value);
+  useEffect(() => { setLocal(value); }, [value]);
+  const throttled = useRafThrottle(onChange);
+  return <input type="range" min={min} max={max} step={step} value={local} onChange={(e) => { const v = Number(e.target.value); setLocal(v); throttled(v); }} {...rest} />;
+}
 const Mini = ({ value, onChange, suffix, step = 1 }) => (
   <div className="mininum"><NumberInput value={value} step={step} onCommit={onChange} />{suffix && <span>{suffix}</span>}</div>
 );
@@ -985,10 +1024,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     try { return merge(JSON.parse(localStorage.getItem(REPORT_CFG_KEY) || "null")) || defaultReportCfg(); } catch { return defaultReportCfg(); }
   });
 
-  // Report the full plan upward so the host can persist it (autosave).
+  // Report the full plan upward so the host can persist it (autosave). Debounced so a burst of
+  // edits (typing, dragging) results in a single save once things settle, not one per keystroke.
   useEffect(() => {
     if (!onChange) return;
-    onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, reportCfg, mcResult });
+    const id = setTimeout(() => {
+      onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, reportCfg, mcResult });
+    }, 600);
+    return () => clearTimeout(id);
   }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, reportCfg, mcResult]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches dark/light.
@@ -1087,8 +1130,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // blocks, and caches by an input signature so reopening an unchanged plan is instant. The reactive
   // plan/chart path never triggers this — it is fully isolated from normal editing.
   const mcSig = useMemo(
-    () => JSON.stringify({ p: effProfile, a: effAssumptions, s: effAssets, i: incomes, e: expenses, l: liabilities, r: protection, ai: autoInvest, lv: mcLevel }),
-    [effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, mcLevel]
+    () => (mcOpen || (reportOpen && reportCfg.sections.mcconf))
+      ? JSON.stringify({ p: effProfile, a: effAssumptions, s: effAssets, i: incomes, e: expenses, l: liabilities, r: protection, ai: autoInvest, lv: mcLevel })
+      : "",
+    [mcOpen, reportOpen, reportCfg.sections.mcconf, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, mcLevel]
   );
   useEffect(() => {
     // Runs when: (a) the MC overlay is open, or (b) the report opens and the section is ticked but
@@ -1600,7 +1645,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           essFirstShortYear = essFunded ? null : essShort[0].year;
           essTotalShortReal = essFunded ? 0 : deflTotal(rsEss);
           essCloseGap = null;
-          if (!essFunded) {
+          if (!essFunded && survEss[k]) {
             let lo = 0, hi = 20000000;
             if (runEss(hi).some((r) => r.shortfall > 0)) essCloseGap = Infinity;
             else { for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (runEss(mid).some((r) => r.shortfall > 0)) lo = mid; else hi = mid; } essCloseGap = hi; }
@@ -1610,7 +1655,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       });
     }
     return { bench, survivor, annualNow };
-  }, [section, reportOpen, incomes, protection, couple, profile, assumptions, assets, expenses, liabilities, ectx, inflDec, protMult, deathAges]);
+  }, [section, reportOpen, incomes, protection, couple, profile, assumptions, assets, expenses, liabilities, ectx, inflDec, protMult, deathAges, survEss]);
 
   // Deterministic commentary engine — observational language only, every number from the engine.
   const generatedCommentary = useMemo(() => {
@@ -2384,7 +2429,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           return (
                           <div className="pg-card" key={sv.k}>
                             <div className="pg-card-name">If {riskOwnerLabel(sv.k)} died at age <Mini value={sv.dAge} step={1} onChange={setDA} /></div>
-                            <div className="pg-surv-slider"><input type="range" min={sv.minAge} max={sv.maxAge} step={1} value={sv.dAge} onChange={(e) => setDA(e.target.value)} aria-label="Death age" /><span className="pg-surv-ages">{sv.minAge}–{sv.maxAge}</span></div>
+                            <div className="pg-surv-slider"><RangeInput min={sv.minAge} max={sv.maxAge} step={1} value={sv.dAge} onChange={setDA} aria-label="Death age" /><span className="pg-surv-ages">{sv.minAge}–{sv.maxAge}</span></div>
                             {sv.hasDisc && <div className="pg-surv-mode"><Seg value={ess ? "ess" : "full"} onChange={(v) => setSurvEss((d) => ({ ...d, [sv.k]: v === "ess" }))} options={[{ value: "full", label: "Full spending" }, { value: "ess", label: "Essentials only" }]} /></div>}
                             <div className="pg-row"><span>Existing life cover paying out</span><span className="num">{fmtFull(sv.payout, cur)}</span></div>
                             {vFunded ? (
@@ -2556,8 +2601,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="legend sm">
                 <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                 {hasPlannedDraw && <span><i style={{ background: DRAWDOWN_COLOR }} /> Planned drawdown</span>}
-                <span><i style={{ background: t.amber }} /> Drawn from savings</span>
-                <span><i style={{ background: t.red }} /> Shortfall</span>
+                {data.some((d) => (d.coveredBySavings || 0) > 0) && <span><i style={{ background: t.amber }} /> Drawn from savings</span>}
+                {data.some((d) => (d.uncovered || 0) > 0) && <span><i style={{ background: t.red }} /> Shortfall</span>}
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
                 {hasContrib && <span><i className="line-key dash" style={{ borderTopColor: t.mid }} /> + savings/contributions</span>}
                 {tax.enabled && <span className="legend-tax-badge">Tax on withdrawals active</span>}
@@ -3556,10 +3601,13 @@ function Stat({ label, value, sub, tone }) {
 }
 
 function WhatIfSlider({ label, value, min, max, step, fmt, onChange }) {
+  const [local, setLocal] = useState(value);
+  useEffect(() => { setLocal(value); }, [value]);
+  const throttled = useRafThrottle(onChange);
   return (
     <div className="wi-slider">
-      <div className="wi-srow"><span className="wi-label">{label}</span><span className={`wi-val num ${value !== 0 ? "on" : ""}`}>{fmt(value)}</span></div>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+      <div className="wi-srow"><span className="wi-label">{label}</span><span className={`wi-val num ${local !== 0 ? "on" : ""}`}>{fmt(local)}</span></div>
+      <input type="range" min={min} max={max} step={step} value={local} onChange={(e) => { const v = Number(e.target.value); setLocal(v); throttled(v); }} />
     </div>
   );
 }
