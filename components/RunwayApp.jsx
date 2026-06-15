@@ -379,6 +379,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
   const ctx = makeCtx(profile, assumptions);
   const couple = ctx.couple;
   const inflDec = (Number(assumptions.inflation) || 0) / 100;
+  const spendingPattern = assumptions.spendingPattern || null; // dynamic "retirement smile" — read from assumptions so every call site honours it
   const sf = Number(assumptions.survivorExpenseFactor);
   const survFactor = (couple && !isNaN(sf) ? sf : 100) / 100;
   const baseYear = new Date().getFullYear();
@@ -460,11 +461,18 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     // expenditure for this year (pro-rated; death rules + survivor factor on joint)
     let expenditure = 0, expEssential = 0, expDiscretionary = 0, liabRepay = 0, premiums = 0;
     const expByOwner = { client1: 0, client2: 0, joint: 0 };
+    // Dynamic spending pattern (the "retirement smile"): discretionary spending eases in later life.
+    // Keyed to the primary client's age. Essentials are never scaled. 1.0 = no change.
+    const spendMult = (!spendingPattern || spendingPattern.mode !== "smile") ? 1
+      : c1Age >= (Number(spendingPattern.noGoAge) || 85) ? (Number(spendingPattern.noGoMult) || 100) / 100
+      : c1Age >= (Number(spendingPattern.slowGoAge) || 75) ? (Number(spendingPattern.slowGoMult) || 100) / 100
+      : 1;
     expenses.forEach((e) => {
       let v = flowForYear(e, y, ctx, inflDec) * frac;
       const o = e.owner || "joint";
       if (couple && (o === "client1" || o === "client2") && !ownerAlive(o)) v = 0;
       else if (couple && o === "joint" && firstDeath) v *= survFactor;
+      if (e.priority === "discretionary" && spendMult !== 1) v *= spendMult; // spending smile applies to lifestyle only
       expenditure += v;
       expByOwner[bucketOf(o)] += v;
       if (e.priority === "discretionary") expDiscretionary += v; else expEssential += v;
@@ -2089,6 +2097,28 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </div>
                   );
                 })()}
+                {(() => {
+                  const sp = assumptions.spendingPattern || { mode: "flat", slowGoAge: 75, noGoAge: 85, slowGoMult: 90, noGoMult: 75 };
+                  const smile = sp.mode === "smile";
+                  const setSP = (p) => setAssumptions((a) => ({ ...a, spendingPattern: { ...sp, ...p } }));
+                  const hasDisc = expenses.some((e) => e.priority === "discretionary");
+                  return (
+                  <div className="spend-primary">
+                    <label className="flbl">Spending through retirement <InfoTip text="Most people don't spend evenly through retirement. The early 'active' years (travel, hobbies) tend to cost more; spending often eases through the quieter years and again in later life. This applies a multiplier to discretionary (lifestyle) spending by age — essential costs are never reduced. Keyed to the primary client's age." /></label>
+                    <div className="spend-mode"><Seg value={smile ? "smile" : "flat"} onChange={(v) => setSP({ mode: v })} options={[{ value: "flat", label: "Stays level" }, { value: "smile", label: "Eases with age" }]} /></div>
+                    <span className="field-note">{smile ? "Lifestyle spending steps down through later retirement (the \u201Cretirement smile\u201D). Essential costs continue unchanged." : "Spending stays at the level you've entered for the whole plan."}</span>
+                    {smile && (
+                      <div className="spend-bands">
+                        <div className="spend-band"><div className="spend-band-name">Active years <em>retirement → {sp.slowGoAge}</em></div><div className="spend-band-val">100%<span>of lifestyle spend</span></div></div>
+                        <div className="spend-band"><div className="spend-band-name">Quieter years <em>{sp.slowGoAge} → {sp.noGoAge}</em></div><div className="spend-band-edit"><Mini value={sp.slowGoMult} suffix="%" onChange={(v) => setSP({ slowGoMult: Math.min(100, Math.max(0, Number(v) || 0)) })} /></div></div>
+                        <div className="spend-band"><div className="spend-band-name">Later years <em>{sp.noGoAge}+</em></div><div className="spend-band-edit"><Mini value={sp.noGoMult} suffix="%" onChange={(v) => setSP({ noGoMult: Math.min(100, Math.max(0, Number(v) || 0)) })} /></div></div>
+                        <div className="spend-ages"><label>Quieter from age</label><Mini value={sp.slowGoAge} onChange={(v) => setSP({ slowGoAge: Math.max(1, Number(v) || 75) })} /><label>Later from age</label><Mini value={sp.noGoAge} onChange={(v) => setSP({ noGoAge: Math.max((Number(sp.slowGoAge) || 75) + 1, Number(v) || 85) })} /></div>
+                        {!hasDisc && <span className="field-note spend-warn">No spending is tagged as discretionary yet, so this has no effect. Tag lifestyle costs as “discretionary” on the expense for the smile to apply.</span>}
+                      </div>
+                    )}
+                  </div>
+                  );
+                })()}
                 <div className="risk-block">
                   <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
                   {riskOwnerKeys.map((k) => (
@@ -2738,6 +2768,25 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           }
           cards.push({ Icon: Shield, verdict: goal.to100 ? "head" : "need", q: "What if I live to 100?", text: goal.to100 ? "The plan still holds even if life runs to age 100." : "The plan would run short before age 100 — longevity is a real risk worth planning for.", note: "All inputs unchanged. Spending and growth rates are held constant to age 100, which may overstate costs (older retirees often spend less) or understate them (long-term care). Consider this a conservative longevity stress test." });
 
+          // CONCENTRATION — how much of today's assets sits in one holding or one class. Observational.
+          {
+            const gross = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
+            if (gross > 0 && assets.length > 0) {
+              let top = assets[0]; assets.forEach((a) => { if ((Number(a.value) || 0) > (Number(top.value) || 0)) top = a; });
+              const byType = {}; assets.forEach((a) => { byType[a.type] = (byType[a.type] || 0) + (Number(a.value) || 0); });
+              let topType = Object.keys(byType)[0]; Object.keys(byType).forEach((tp) => { if (byType[tp] > byType[topType]) topType = tp; });
+              const assetPct = Math.round(((Number(top.value) || 0) / gross) * 100);
+              const typePct = Math.round((byType[topType] / gross) * 100);
+              const concentrated = assetPct >= 50 || typePct >= 70;
+              const single = assets.length === 1;
+              cards.push({ Icon: Layers, verdict: concentrated ? "info" : "head", q: "How spread out are the assets?",
+                text: single
+                  ? <>Everything sits in a single holding — <b>{top.name || TYPE_LABEL[top.type]}</b>. The whole plan rides on how that one asset performs.</>
+                  : <>The largest single holding, <b>{top.name || TYPE_LABEL[top.type]}</b>, is about <b>{assetPct}%</b> of total assets, and <b>{typePct}%</b> sits in {(TYPE_LABEL[topType] || topType).toLowerCase()}. {concentrated ? "That's a notable concentration — the plan leans heavily on how that part performs." : "That's a reasonably balanced spread across holdings."}</>,
+                note: "How much of total assets sits in one holding or one asset class. An observation about diversification — not a recommendation. Uses today's gross asset values, before debts." });
+            }
+          }
+
           // PROPERTY AS A BACKSTOP — only when property is held and currently treated as non-spendable.
           if (goal.propRelease) {
             const pr = goal.propRelease;
@@ -2881,7 +2930,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             <div className="modal-scrim" onClick={() => setMcOpen(false)}>
               <div className="modal mc-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-head">
-                  <div><div className="modal-title"><Activity size={16} /> Plan confidence</div><div className="modal-sub">How the plan holds up across {MC_RUNS} randomised market futures, varied around your assumed growth.</div></div>
+                  <div><div className="modal-title"><Activity size={16} /> Goal confidence</div><div className="modal-sub">The chance of meeting {couple ? `${fn1} & ${fn2}'s` : `${fn1}'s`} goals across {MC_RUNS} randomised market futures, varied around your assumed growth.</div></div>
                   <button className="icon-btn" onClick={() => setMcOpen(false)}><XCircle size={18} /></button>
                 </div>
 
@@ -2894,10 +2943,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <div className="mc-headline">
                       <div className={`mc-prob mc-prob-${pill}`}>{Math.round(prob)}<span>%</span></div>
                       <div className="mc-headline-txt">
-                        <div className="mc-headline-main">of {MC_RUNS} simulated futures keep the plan <b>funded for life</b></div>
+                        <div className="mc-headline-main">chance of the main goal — funding {couple ? "both" : fn1 + "'s"} lifestyle <b>for life</b> without running out</div>
                         <div className="mc-headline-sub">The single-line plan assumes returns arrive smoothly. This varies them year to year — capturing the risk of a bad run, especially around retirement.</div>
                       </div>
                     </div>
+
+                    {endF && (
+                      <div className="mc-goals">
+                        <div className="mc-goal"><span className="mc-goal-q">Income goal — never run out</span><b className={`mc-goal-a mc-goal-${pill}`}>{Math.round(prob)}% of futures</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Legacy — left at plan end in a typical future</span><b className="mc-goal-a">{m(d0(endF.p50, endF.y))}</b></div>
+                        <div className="mc-goal"><span className="mc-goal-q">Legacy — in a poor run (worst 1 in 10)</span><b className="mc-goal-a">{m(d0(endF.p10, endF.y))}</b></div>
+                      </div>
+                    )}
 
                     <div className="mc-controls">
                       <div className="rec-field"><label>Market volatility <InfoTip text="How widely returns swing around your assumed growth. Derived from each asset's expected return — higher-returning assets are assumed more volatile. Cash barely moves; equities and pensions move most. Lower / Typical / Higher scales the whole range." /></label>
@@ -3822,6 +3879,18 @@ const CSS = `
 .surplus-opt.on .surplus-radio::after{content:"";position:absolute;inset:2.5px;border-radius:50%;background:var(--accent);}
 .surplus-opt-desc{font-size:11.5px;color:var(--low);line-height:1.45;padding-left:24px;}
 .surplus-dest{margin-top:11px;}
+.spend-primary{margin:14px 0 4px;padding:13px;border:1px solid var(--border);border-radius:12px;background:var(--bg);}
+.spend-mode{margin:9px 0 7px;}
+.spend-bands{margin-top:10px;display:flex;flex-direction:column;gap:7px;}
+.spend-band{display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:9px;padding:8px 11px;background:var(--card);}
+.spend-band-name{font-size:12.5px;font-weight:600;color:var(--ink);display:flex;flex-direction:column;gap:1px;}
+.spend-band-name em{font-style:normal;font-size:11px;font-weight:500;color:var(--low);font-variant-numeric:tabular-nums;}
+.spend-band-val{font-size:13px;font-weight:650;color:var(--mid);display:flex;flex-direction:column;align-items:flex-end;}
+.spend-band-val span{font-size:10px;font-weight:500;color:var(--low);}
+.spend-band-edit{flex-shrink:0;}
+.spend-ages{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;font-size:11.5px;color:var(--low);}
+.spend-ages label{margin-left:4px;}
+.spend-warn{color:var(--amber);margin-top:6px;}
 .text-in{background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit;width:100%;}
 .text-in:focus,.money-in:focus,.mininum input:focus,.rec-name:focus,.pick:focus,.anchor-age:focus{outline:none;border-color:var(--accent);}
 .ed-hint{font-size:11.5px;color:var(--low);line-height:1.5;margin:6px 0 0;border-top:1px solid var(--border);padding-top:12px;}
@@ -4008,6 +4077,14 @@ const CSS = `
 .mc-headline-txt{flex:1;}
 .mc-headline-main{font-size:15px;color:var(--ink);line-height:1.45;}
 .mc-headline-sub{font-size:12.5px;color:var(--mid);line-height:1.5;margin-top:5px;}
+.mc-goals{display:flex;flex-direction:column;gap:1px;border:1px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:16px;background:var(--card);}
+.mc-goal{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 13px;border-bottom:1px solid var(--border);}
+.mc-goal:last-child{border-bottom:none;}
+.mc-goal-q{font-size:12.5px;color:var(--mid);}
+.mc-goal-a{font-size:13px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums;}
+.mc-goal-a.mc-goal-green{color:var(--green);}
+.mc-goal-a.mc-goal-amber{color:var(--amber);}
+.mc-goal-a.mc-goal-red{color:var(--red);}
 .mc-controls{margin-bottom:14px;}
 .mc-controls .rec-field{max-width:280px;}
 .mc-chart{margin-bottom:14px;}
