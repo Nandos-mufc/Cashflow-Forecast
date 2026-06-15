@@ -380,17 +380,22 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
   const liab = {};
   liabilities.forEach((L) => (liab[L.id] = Math.max(0, Number(L.balance) || 0)));
 
+  // Growth preference for where surplus accumulates. Default 'cash' preserves prior behaviour
+  // (cash-first, else investment). 'invest' flips the ordering so surplus compounds at the
+  // investment rate. An explicit surplusDestId still overrides this entirely.
+  const surGrow = assumptions.surplusGrowth === "invest" ? "investment" : "cash";
+  const surOther = surGrow === "cash" ? "investment" : "cash";
   const surplusDest = () => {
     const chosen = assumptions.surplusDestId && assets.find((a) => a.id === assumptions.surplusDestId && (a.type === "cash" || a.type === "investment"));
     if (chosen) return chosen.id;
-    return (assets.find((a) => a.type === "cash") || assets.find((a) => a.type === "investment") || assets[0] || {}).id;
+    return (assets.find((a) => a.type === surGrow) || assets.find((a) => a.type === surOther) || assets[0] || {}).id;
   };
   // Where a given person's surplus accumulates: their own cash/investment first, then a joint pot, then the global default.
   // This keeps each partner's saved surplus attributed to them, which matters on death (the pot transfers by its owner's rules).
   const ownerDest = (o) => {
     const own = (t) => assets.find((a) => a.type === t && (a.owner || "client1") === o);
     const jnt = (t) => assets.find((a) => a.type === t && (a.owner || "client1") === "joint");
-    const a = own("cash") || own("investment") || jnt("cash") || jnt("investment");
+    const a = own(surGrow) || own(surOther) || jnt(surGrow) || jnt(surOther);
     return a ? a.id : surplusDest();
   };
   const bucketOf = (o) => (o === "client2" ? "client2" : o === "joint" ? "joint" : "client1");
@@ -1048,7 +1053,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       // The engine already pays any in-force life cover into the pot in the year of death (see the
       // protection loop in projectCashflow). We must NOT inject it again here, or the survivor's pot
       // would receive the sum assured twice and the plan would look far healthier than it is.
-      return projectCashflow({ ...baseArgs, profile: sovProf });
+      const sovExp = survivorOverlay.essentialOnly ? expenses.filter((e) => (e.priority || "essential") !== "discretionary") : expenses;
+      return projectCashflow({ ...baseArgs, profile: sovProf, expenses: sovExp });
     }
     if (stressShocks) return projectCashflow({ ...baseArgs, shocks: stressShocks.shocks, shockTypes: stressShocks.shockTypes, shockMode: stressShocks.shockMode });
     return null;
@@ -1168,7 +1174,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       if (sc.lensable) bits.push(stressCfg.lens === "global" ? "global equity" : "UK equity");
       scenarioLabel = bits.join(" · ");
     }
-    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : scenarioLabel;
+    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}` : scenarioLabel;
     return { label, baseAge: ageOf(rows.find((r) => r.shortfall > 0)), stressAge: ageOf(stressRows.find((r) => r.shortfall > 0)) };
   }, [stressRows, rows, stress, stressCfg, ci, survivorOverlay, fn1, fn2]);
 
@@ -1179,12 +1185,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
     const o = survivorOverlay.owner;
     const sovProf = { ...effProfile, [o]: { ...effProfile[o], lifeExpectancy: survivorOverlay.deathAge } };
+    const sovExp = survivorOverlay.essentialOnly ? expenses.filter((e) => (e.priority || "essential") !== "discretionary") : expenses;
     const cover = protection.filter((p) => (p.ptype || "life") !== "ci" && (p.insured || "client1") === o && (Number(p.coverToAge) || 0) > survivorOverlay.deathAge).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
     // "No cover" = the same death, but with this person's life policies removed entirely, so the engine
     // pays nothing on death. (Passing lumpSums:[] is not enough — the engine pays in-force cover
     // automatically from the protection array.) The difference isolates what the cover is worth.
     const protNoCover = protection.filter((p) => !((p.ptype || "life") !== "ci" && (p.insured || "client1") === o));
-    const noCoverRows = projectCashflow({ ...baseArgs, profile: sovProf, protection: protNoCover });
+    const noCoverRows = projectCashflow({ ...baseArgs, profile: sovProf, expenses: sovExp, protection: protNoCover });
     const realEnd = (rws) => { if (!rws.length) return 0; const last = rws[rws.length - 1]; const f = showReal ? Math.pow(1 + inflDec, last.y) : 1; return (last.total - (last.debt || 0)) / f; };
     const baseEnd = realEnd(rows), withCoverEnd = realEnd(stressRows), noCoverEnd = realEnd(noCoverRows);
     const survDep = stressRows.find((r) => r.shortfall > 0);
@@ -1309,7 +1316,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (survivorOverlay) {
       const diedName = survivorOverlay.owner === "client2" ? fn2 : fn1;
       const deathYear = baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1));
-      ev.push({ label: `${diedName} dies age ${survivorOverlay.deathAge}`, year: deathYear, color: t.red, isSurvivorDeath: true });
+      ev.push({ label: `${diedName} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}`, year: deathYear, color: t.red, isSurvivorDeath: true });
     } else if (markers.firstDeath) {
       ev.push({ label: "First death", year: markers.firstDeath, color: t.mid });
     }
@@ -1516,6 +1523,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return n;
   });
   const [deathAges, setDeathAges] = useState({ client1: null, client2: null }); // null = default (current age + 1)
+  const [survEss, setSurvEss] = useState({ client1: false, client2: false }); // survivor test: essentials-only spending mode per owner
   const protGap = useMemo(() => {
     if (section !== "protection" && !reportOpen) return null;
     // Current annual income per person; joint-owned income split 50/50.
@@ -1563,7 +1571,27 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           if (run(hi).some((r) => r.shortfall > 0)) closeGap = Infinity;
           else { for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (run(mid).some((r) => r.shortfall > 0)) lo = mid; else hi = mid; } closeGap = hi; }
         }
-        return { k, dAge, minAge, maxAge, funded, firstShortYear, totalShortReal, payout, closeGap };
+        // Essentials-only floor — re-run dropping discretionary spend. This gives a need-range:
+        // what the survivor MUST be able to cover (essentials) vs what the full planned lifestyle costs.
+        // The difference tells the adviser how much of any gap is discretionary (trimmable) vs hard.
+        const hasDisc = expenses.some((e) => e.priority === "discretionary");
+        let essFunded = funded, essFirstShortYear = firstShortYear, essTotalShortReal = totalShortReal, essCloseGap = closeGap;
+        if (hasDisc) {
+          const essExpenses = expenses.filter((e) => (e.priority || "essential") !== "discretionary");
+          const runEss = (extra) => projectCashflow({ ...baseArgs, profile: prof2, expenses: essExpenses, lumpSums: extra > 0 ? [{ year: dAge + 1 - age0, amount: extra }] : [] });
+          const rsEss = runEss(0);
+          const essShort = rsEss.filter((r) => (r.shortfall || 0) > 0);
+          essFunded = essShort.length === 0;
+          essFirstShortYear = essFunded ? null : essShort[0].year;
+          essTotalShortReal = essFunded ? 0 : deflTotal(rsEss);
+          essCloseGap = null;
+          if (!essFunded) {
+            let lo = 0, hi = 20000000;
+            if (runEss(hi).some((r) => r.shortfall > 0)) essCloseGap = Infinity;
+            else { for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (runEss(mid).some((r) => r.shortfall > 0)) lo = mid; else hi = mid; } essCloseGap = hi; }
+          }
+        }
+        return { k, dAge, minAge, maxAge, hasDisc, funded, firstShortYear, totalShortReal, payout, closeGap, essFunded, essFirstShortYear, essTotalShortReal, essCloseGap };
       });
     }
     return { bench, survivor, annualNow };
@@ -1972,10 +2000,33 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="ed-body">
                 <h2 className="ed-title">Assumptions</h2>
                 <div className="field"><label>Inflation rate</label><Mini value={assumptions.inflation} step={0.1} suffix="%" onChange={(v) => setAssumptions((a) => ({ ...a, inflation: v }))} /><span className="field-note">Drives every "with inflation" line and the today's-money view.</span></div>
-                <div className="field"><label>Surplus income</label><Seg value={assumptions.autoInvestSurplus === false ? "spend" : "invest"} onChange={(v) => setAssumptions((a) => ({ ...a, autoInvestSurplus: v === "invest" }))} options={[{ value: "invest", label: "Reinvested" }, { value: "spend", label: "Spent / external" }]} /><span className="field-note">{assumptions.autoInvestSurplus === false ? "Income above spending leaves the plan — pots grow only by their own returns and contributions. Best for illustrating a single investment." : "Income above spending is added to the account chosen below each year. Best for a full household plan."}</span></div>
-                {assumptions.autoInvestSurplus !== false && (() => { const cashInv = assets.filter((a) => a.type === "cash" || a.type === "investment"); return cashInv.length > 0 ? (
-                  <div className="field"><label>Surplus goes to</label><Pick value={assumptions.surplusDestId && cashInv.some((a) => a.id === assumptions.surplusDestId) ? assumptions.surplusDestId : ""} onChange={(v) => setAssumptions((a) => ({ ...a, surplusDestId: v || null }))} options={[{ value: "", label: couple ? "Auto — each partner's own pot" : "Auto (first cash, else investment)" }, ...cashInv.map((a) => ({ value: a.id, label: a.name || "Untitled" }))]} /><span className="field-note">{assumptions.surplusDestId && cashInv.some((a) => a.id === assumptions.surplusDestId) ? "All surplus is added to this one account each year, whoever earned it." : couple ? "Auto: each partner's surplus is worked out separately (their income less their share of spending and contributions) and lands in their own cash or investment pot — so it transfers by that person's rules on death. Joint income and spending are split evenly. Pick a specific account above to send all surplus to one pot instead." : "Surplus is added to your cash account, or your first investment if you have no cash. Pick a specific account above to override."}</span></div>
-                ) : null; })()}
+                {(() => {
+                  const cashInv = assets.filter((a) => a.type === "cash" || a.type === "investment");
+                  const hasCash = assets.some((a) => a.type === "cash");
+                  const surplusMode = assumptions.autoInvestSurplus === false ? "leave" : (assumptions.surplusGrowth === "invest" ? "reinvest" : "cash");
+                  const setMode = (m) => setAssumptions((a) => ({ ...a, autoInvestSurplus: m !== "leave", surplusGrowth: m === "reinvest" ? "invest" : "cash" }));
+                  const opts = [
+                    { value: "reinvest", label: "Reinvested", desc: "Added to investments each year and compounds at the investment growth rate. The most optimistic — on long plans this can shift the end result by seven figures." },
+                    { value: "cash", label: "Saved as cash", desc: hasCash ? "Swept into cash each year, growing only at the cash rate. Safer, but inflation slowly erodes its real value." : "Swept into savings each year — but there's no cash account yet, so it sits in your first investment until you add one." },
+                    { value: "leave", label: "Leaves the plan", desc: "Treated as spent or moved elsewhere. Pots grow only by their own returns and contributions. Best when illustrating a single product or investment." },
+                  ];
+                  return (
+                  <div className="surplus-primary">
+                    <label className="flbl">What happens to spare income each year? <InfoTip text="Every year a household earns more than it spends, that surplus has to go somewhere. This single choice is one of the biggest drivers of the end result — on a high-earning plan the gap between 'reinvested' and 'leaves the plan' can be several million pounds. It's surfaced here so it's a deliberate decision, not a hidden default." /></label>
+                    <div className="surplus-opts">
+                      {opts.map((o) => (
+                        <button key={o.value} type="button" className={`surplus-opt ${surplusMode === o.value ? "on" : ""}`} onClick={() => setMode(o.value)}>
+                          <span className="surplus-opt-top"><span className="surplus-radio" />{o.label}</span>
+                          <span className="surplus-opt-desc">{o.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {surplusMode !== "leave" && cashInv.length > 0 && (
+                      <div className="field surplus-dest"><label>Send it to</label><Pick value={assumptions.surplusDestId && cashInv.some((a) => a.id === assumptions.surplusDestId) ? assumptions.surplusDestId : ""} onChange={(v) => setAssumptions((a) => ({ ...a, surplusDestId: v || null }))} options={[{ value: "", label: couple ? "Auto — each partner's own pot" : "Auto — best matching pot" }, ...cashInv.map((a) => ({ value: a.id, label: a.name || "Untitled" }))]} /><span className="field-note">{assumptions.surplusDestId && cashInv.some((a) => a.id === assumptions.surplusDestId) ? "All surplus goes to this one account each year, whoever earned it — this overrides the choice above." : couple ? "Auto: each partner's surplus is worked out separately and lands in their own pot, so it transfers by that person's rules on death. Joint income and spending are split evenly. Pick a specific account to override." : "Auto picks the pot that matches your choice above. Pick a specific account to override."}</span></div>
+                    )}
+                  </div>
+                  );
+                })()}
                 <div className="risk-block">
                   <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
                   {riskOwnerKeys.map((k) => (
@@ -2283,19 +2334,33 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {couple && protGap.survivor && (
                       <div className="pg-surv">
                         <label className="flbl" style={{ marginTop: 14 }}>Survivor test <InfoTip text="The real measure. The engine re-runs the whole plan assuming death at the age you choose: income stops, the survivor's spending adjusts, assets transfer, and any in-term life cover pays out. If the survivor's plan runs short, the figure shown is the additional lump sum at death that would keep it funded — computed by the engine, not a rule of thumb." /></label>
-                        {protGap.survivor.map((sv) => (
+                        {protGap.survivor.map((sv) => {
+                          const ess = !!survEss[sv.k];
+                          const setDA = (v) => { const na = Math.min(sv.maxAge, Math.max(sv.minAge, Math.round(Number(v) || sv.minAge))); setDeathAges((d) => ({ ...d, [sv.k]: na })); setSurvivorOverlay((ov) => (ov && ov.owner === sv.k ? { ...ov, deathAge: na } : ov)); };
+                          // Verdict reflects the selected spending mode (full lifestyle vs essentials-only floor).
+                          const vFunded = ess ? sv.essFunded : sv.funded;
+                          const vShortYear = ess ? sv.essFirstShortYear : sv.firstShortYear;
+                          const vShortTotal = ess ? sv.essTotalShortReal : sv.totalShortReal;
+                          const vCloseGap = ess ? sv.essCloseGap : sv.closeGap;
+                          return (
                           <div className="pg-card" key={sv.k}>
-                            <div className="pg-card-name">If {riskOwnerLabel(sv.k)} died at age <Mini value={sv.dAge} step={1} onChange={(v) => { const na = Math.min(sv.maxAge, Math.max(sv.minAge, Math.round(Number(v) || sv.minAge))); setDeathAges((d) => ({ ...d, [sv.k]: na })); setSurvivorOverlay((ov) => (ov && ov.owner === sv.k ? { owner: sv.k, deathAge: na } : ov)); }} /></div>
+                            <div className="pg-card-name">If {riskOwnerLabel(sv.k)} died at age <Mini value={sv.dAge} step={1} onChange={setDA} /></div>
+                            <div className="pg-surv-slider"><input type="range" min={sv.minAge} max={sv.maxAge} step={1} value={sv.dAge} onChange={(e) => setDA(e.target.value)} aria-label="Death age" /><span className="pg-surv-ages">{sv.minAge}–{sv.maxAge}</span></div>
+                            {sv.hasDisc && <div className="pg-surv-mode"><Seg value={ess ? "ess" : "full"} onChange={(v) => setSurvEss((d) => ({ ...d, [sv.k]: v === "ess" }))} options={[{ value: "full", label: "Full spending" }, { value: "ess", label: "Essentials only" }]} /></div>}
                             <div className="pg-row"><span>Existing life cover paying out</span><span className="num">{fmtFull(sv.payout, cur)}</span></div>
-                            {sv.funded ? (
-                              <div className="pg-row pg-verdict pg-ok"><span>Survivor's plan stays funded to the end</span><span className="num">✓</span></div>
+                            {vFunded ? (
+                              <div className="pg-row pg-verdict pg-ok"><span>Survivor's plan stays funded to the end{ess ? " on essentials" : ""}</span><span className="num">✓</span></div>
                             ) : (<>
-                              <div className="pg-row pg-verdict pg-gap"><span>Survivor's plan runs short from {sv.firstShortYear}</span><span className="num">−{fmtFull(sv.totalShortReal, cur)} total</span></div>
-                              <div className="pg-row pg-close"><span>Additional cover that closes the gap</span><span className="num">{sv.closeGap === Infinity ? "Beyond " + fmtFull(20000000, cur) : "~" + fmtFull(Math.ceil(sv.closeGap / 10000) * 10000, cur)}</span></div>
+                              <div className="pg-row pg-verdict pg-gap"><span>Survivor's plan runs short from {vShortYear}{ess ? " even on essentials" : ""}</span><span className="num">−{fmtFull(vShortTotal, cur)} total</span></div>
+                              <div className="pg-row pg-close"><span>Additional cover that closes the gap</span><span className="num">{vCloseGap === Infinity ? "Beyond " + fmtFull(20000000, cur) : "~" + fmtFull(Math.ceil(vCloseGap / 10000) * 10000, cur)}</span></div>
                             </>)}
-                        {(() => { const isActive = survivorOverlay && survivorOverlay.owner === sv.k && survivorOverlay.deathAge === sv.dAge; return isActive ? (<button className="pg-chart-btn pg-chart-btn-on" onClick={() => setSurvivorOverlay(null)}>× Clear from chart</button>) : (<button className="pg-chart-btn" onClick={() => applySurvivor({ owner: sv.k, deathAge: sv.dAge })}>↗ Show on chart</button>); })()}
+                            {sv.hasDisc && !ess && !sv.funded && (
+                              <div className="pg-surv-range">{sv.essFunded ? <>On essentials only, the survivor's plan stays funded for life — the shortfall is in discretionary lifestyle spending, not core needs.</> : <>Even trimmed to essentials, the plan runs short from {sv.essFirstShortYear}{sv.essTotalShortReal > 0 ? <> (−{fmtFull(sv.essTotalShortReal, cur)} total)</> : null} — this gap is in core spending.</>}</div>
+                            )}
+                        {(() => { const isActive = survivorOverlay && survivorOverlay.owner === sv.k && survivorOverlay.deathAge === sv.dAge && !!survivorOverlay.essentialOnly === ess; return isActive ? (<button className="pg-chart-btn pg-chart-btn-on" onClick={() => setSurvivorOverlay(null)}>× Clear from chart</button>) : (<button className="pg-chart-btn" onClick={() => applySurvivor({ owner: sv.k, deathAge: sv.dAge, essentialOnly: ess })}>↗ Show on chart{ess ? " (essentials)" : ""}</button>); })()}
                           </div>
-                        ))}
+                          );
+                        })}
                         <span className="field-note">Shortfall totals are in today's money. "Closes the gap" is the smallest lump sum at death under which no year shows a shortfall — an analysis of this plan, not a recommendation.</span>
                       </div>
                     )}
@@ -2448,7 +2513,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             </div>
 
             <div className="cash-head">
-              <div className="cash-title">Money in vs money out<span>{stress || ci || survivorOverlay ? (survivorOverlay ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}` : "showing the stressed scenario — income/spending under the shock") : "each year · hover for the breakdown by source"}</span></div>
+              <div className="cash-title">Money in vs money out<span>{stress || ci || survivorOverlay ? (survivorOverlay ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}` : "showing the stressed scenario — income/spending under the shock") : "each year · hover for the breakdown by source"}</span></div>
               <div className="legend sm">
                 <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                 {hasPlannedDraw && <span><i style={{ background: DRAWDOWN_COLOR }} /> Planned drawdown</span>}
@@ -2487,7 +2552,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <span className="gap-title">Cash gap <InfoTip text="Your plan in phases. Green: income covers spending. Amber: spending exceeds income and the difference is drawn from savings — normal in retirement; the question is whether the pots last. Red: the gap can no longer be met from income or accessible savings." /></span>
                 <span className="gap-sub">{stress || ci || survivorOverlay
                   ? survivorOverlay
-                    ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}`
+                    ? `survivor plan — ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}`
                     : ci
                       ? `CI scenario — ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}`
                       : stressImpact ? stressImpact.label : "stress scenario"
@@ -2832,7 +2897,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The size of the gap is sensitive to contributions, retirement age and planned spending.`;
           const longevity = kpis.depletionAge === null ? "Funded for life" : `Funds to age ${kpis.depletionAge}`;
           const scenarioSuffix = survivorOverlay
-            ? ` — ${survivorOverlay.owner === "client2" ? dfn2 : dfn1} dies age ${survivorOverlay.deathAge}`
+            ? ` — ${survivorOverlay.owner === "client2" ? dfn2 : dfn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}`
             : ci
               ? ` — CI · ${ci.owner === "client2" ? dfn2 : dfn1} age ${ci.age}`
               : stressImpact && stressActive
@@ -3553,6 +3618,11 @@ const CSS = `
 .pg-chart-btn:hover{border-color:var(--accent);color:var(--accent);}
 .pg-chart-btn-on{border-color:var(--red);color:var(--red);}
 .pg-chart-btn-on:hover{border-color:var(--red);color:var(--red);}
+.pg-surv-slider{display:flex;align-items:center;gap:9px;margin:1px 0 5px;}
+.pg-surv-slider input[type=range]{flex:1;accent-color:var(--accent);height:18px;cursor:pointer;}
+.pg-surv-ages{font-size:10.5px;color:var(--low);font-variant-numeric:tabular-nums;flex-shrink:0;}
+.pg-surv-mode{margin:0 0 6px;}
+.pg-surv-range{font-size:11.5px;line-height:1.45;color:var(--mid);background:var(--track);border-radius:7px;padding:7px 9px;margin-top:5px;}
 .scen-row{display:flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:10px;padding:8px 10px;background:var(--bg);}
 .scen-row.on{border-color:var(--accent);}
 .scen-name{flex:1;min-width:0;background:none;border:none;outline:none;font:inherit;font-size:13px;font-weight:600;color:var(--ink);}
@@ -3639,6 +3709,17 @@ const CSS = `
 .field{display:flex;flex-direction:column;gap:6px;}
 .field label{font-size:12.5px;color:var(--mid);font-weight:500;}
 .field-note{font-size:11.5px;color:var(--low);line-height:1.4;}
+.surplus-primary{margin:14px 0 4px;padding:13px;border:1px solid var(--border);border-radius:12px;background:var(--bg);}
+.surplus-opts{display:flex;flex-direction:column;gap:7px;margin-top:9px;}
+.surplus-opt{display:flex;flex-direction:column;gap:3px;text-align:left;border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--card);cursor:pointer;font-family:inherit;transition:border-color .12s ease,background .12s ease;}
+.surplus-opt:hover{border-color:var(--mid);}
+.surplus-opt.on{border-color:var(--accent);background:color-mix(in srgb, var(--accent) 6%, transparent);}
+.surplus-opt-top{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:650;color:var(--ink);}
+.surplus-radio{width:15px;height:15px;border-radius:50%;border:2px solid var(--border);flex-shrink:0;position:relative;transition:border-color .12s ease;}
+.surplus-opt.on .surplus-radio{border-color:var(--accent);}
+.surplus-opt.on .surplus-radio::after{content:"";position:absolute;inset:2.5px;border-radius:50%;background:var(--accent);}
+.surplus-opt-desc{font-size:11.5px;color:var(--low);line-height:1.45;padding-left:24px;}
+.surplus-dest{margin-top:11px;}
 .text-in{background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit;width:100%;}
 .text-in:focus,.money-in:focus,.mininum input:focus,.rec-name:focus,.pick:focus,.anchor-age:focus{outline:none;border-color:var(--accent);}
 .ed-hint{font-size:11.5px;color:var(--low);line-height:1.5;margin:6px 0 0;border-top:1px solid var(--border);padding-top:12px;}
