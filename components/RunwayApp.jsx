@@ -1750,7 +1750,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         return s;
       }, 0);
     };
-    const curSpend = spendAtYear(retYearOff) || spendAtYear(0);
+    // curSpend (and therefore maxSpend = curSpend × multiplier) must be in TODAY'S money to match the
+    // card's "in today's money" label. spendAtYear returns the nominal, inflation-escalated spend at the
+    // offset, so deflate by inflation over that offset to recover the real value. Without this the card
+    // reported a future-money figure (~48% higher over a 16-year offset) while calling it today's money.
+    const realSpendAtYear = (off) => spendAtYear(off) / Math.pow(1 + (Number(assumptions.inflation) || 0) / 100, off);
+    const curSpend = realSpendAtYear(retYearOff) || realSpendAtYear(0);
     const baseInflPct = Number(assumptions.inflation) || 0;
     const estateAtEnd = (inp) => { const rr = projectCashflow(inp); if (!rr.length) return 0; const ly = rr.length - 1; return Math.max(0, (rr[ly].total - (rr[ly].debt || 0))) / Math.pow(1 + baseInflPct / 100, ly); };
 
@@ -2733,12 +2738,15 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             // ONE-OFF — liquid-only, with a safe figure and an absolute ceiling, each explained.
             if (goal.oneOff != null) {
               const oo = goal.oneOff;
+              // When the ceiling equals the whole liquid pool, the plan never actually fails within reach —
+              // the limit is simply how much accessible cash exists, not a depletion point. Word it honestly.
+              const maxCapped = oo.max >= oo.liquidToday - 1;
               if (oo.liquidToday <= 0)
                 cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: "There are no cash or investment assets marked available for drawdown, so there's nothing liquid to fund a one-off purchase from today.", note: "A one-off here is funded only from cash and investments you've marked available for drawdown — not pensions or property." });
               else if (oo.safe <= 0)
-                cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: <>There's no <b>safe</b> room for a one-off right now — spending any of your cash or investments today would put the plan at risk if returns disappoint or you live longer than expected. The most you could spend before the plan would run short on current assumptions is about <b>{m(oo.max)}</b>, but that leaves no margin at all.</>, note: "Funded only from cash and investments marked available for drawdown — pensions and property are excluded. \u201CSafe\u201D means the plan still funds for life even with returns 2 points lower across all assets and both of you living to 100. Today's money; ignores any tax on a sale." });
+                cards.push({ Icon: Landmark, verdict: "info", q: "Could I afford a big one-off purchase today?", text: <>There's no <b>safe</b> room for a one-off right now — spending any of your cash or investments today would put the plan at risk if returns disappoint or you live longer than expected. {maxCapped ? <>You could free up your entire accessible cash and investments — about <b>{m(oo.max)}</b> — and the plan would still fund for life on current assumptions, but it leaves no liquid buffer and no margin for poor markets or a longer life.</> : <>The most you could spend before the plan would run short on current assumptions is about <b>{m(oo.max)}</b>, but that leaves no margin at all.</>}</>, note: "Funded only from cash and investments marked available for drawdown — pensions and property are excluded. \u201CSafe\u201D means the plan still funds for life even with returns 2 points lower across all assets and both of you living to 100. Today's money; ignores any tax on a sale." });
               else
-                cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: <>About <b>{m(oo.safe)}</b> today, taken from your cash and investments and leaving pensions and property untouched — with the plan still funded for life <i>even if</i> returns run 2 points lower and you both live to 100. That would leave roughly {m(oo.leftover)} in accessible savings and a projected estate of about {m(oo.estateAfter)} at the end of the plan. Stretching further, the most you could spend before the plan would run short on current assumptions is {m(oo.max)} — but that keeps no margin for poor markets or a longer life.</>, note: "Funded only from cash and investments you've marked available for drawdown — pensions and property are deliberately excluded, as spending those involves tax, access and your legacy. Figures are in today's money and ignore any tax or penalty on a sale." });
+                cards.push({ Icon: Landmark, verdict: "head", q: "Could I afford a big one-off purchase today?", text: <>About <b>{m(oo.safe)}</b> today, taken from your cash and investments and leaving pensions and property untouched — with the plan still funded for life <i>even if</i> returns run 2 points lower and you both live to 100. That would leave roughly {m(oo.leftover)} in accessible savings and a projected estate of about {m(oo.estateAfter)} at the end of the plan. {maxCapped ? <>Beyond that you could draw on the rest of your accessible cash and investments — up to about {m(oo.max)} in total — with the plan still funded on current assumptions, though that leaves no liquid buffer for poor markets or a longer life.</> : <>Stretching further, the most you could spend before the plan would run short on current assumptions is {m(oo.max)} — but that keeps no margin for poor markets or a longer life.</>}</>, note: "Funded only from cash and investments you've marked available for drawdown — pensions and property are deliberately excluded, as spending those involves tax, access and your legacy. Figures are in today's money and ignore any tax or penalty on a sale." });
             }
 
             // MONTHLY
@@ -3432,7 +3440,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <section className="report-page">
                       <h2 className="rep-h2">Plan confidence</h2>
                       {!fresh && <p className="rep-p rep-sub" style={{color:"var(--amber)"}}>Note: this result was computed on a previous version of the plan. A fresh simulation is running in the background.</p>}
-                      <p className="rep-p rep-lede">Across <b>{MC_RUNS}</b> simulated futures with market returns varied around the plan&apos;s assumptions ({lvl} volatility), <b>{p}%</b> keep the plan funded for life.</p>
+                      <p className="rep-p rep-lede">Across <b>{MC_RUNS}</b> simulated futures with market returns varied around the plan's assumptions ({lvl} volatility), <b>{p}%</b> keep the plan funded for life.</p>
                       <p className="rep-p rep-sub">The main projection assumes returns arrive smoothly each year. This test varies them &#8212; modelling good and bad runs of markets, including a poor run early in retirement &#8212; and counts how often the plan still holds.</p>
                       <table className="rep-table">
                         <tbody>
@@ -3453,7 +3461,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         </ComposedChart>
                       </div>
                       <div className="rep-legend"><span><i style={{ background: "#2f6fb0", opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: "#2f6fb0", opacity: 0.13 }} /> Middle 80%</span><span><i className="rep-solid" style={{ background: "#2f6fb0" }} /> Median path</span></div>
-                      <p className="rep-p rep-sub">Spendable assets exclude property, in {showReal ? "today&apos;s money" : "future money"}. Returns are modelled as normal variation with a shared market factor; real markets carry occasional larger shocks, so this is an indicator of resilience, not a precise probability or a forecast.</p>
+                      <p className="rep-p rep-sub">Spendable assets exclude property, in {showReal ? "today's money" : "future money"}. Returns are modelled as normal variation with a shared market factor; real markets carry occasional larger shocks, so this is an indicator of resilience, not a precise probability or a forecast.</p>
                       <RepFoot />
                     </section>
                   );
@@ -3486,10 +3494,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         const svName = sv.k === "client2" ? dfn2 : dfn1;
                         return (
                           <p className="rep-p" key={sv.k}>
-                            If {svName} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor&apos;s plan{" "}
+                            If {svName} died at age {sv.dAge}: existing cover of {m(sv.payout)} would pay out, and the survivor's plan{" "}
                             {sv.funded
                               ? "remains funded to the end of the projection"
-                              : <>runs short from {sv.firstShortYear} by <b className="rep-gap-fig">{m(sv.totalShortReal)}</b> in total (today&apos;s money){" "}&#8212; additional cover of{" "}<b className="rep-gap-fig">{sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)}</b> at death would close the gap</>
+                              : <>runs short from {sv.firstShortYear} by <b className="rep-gap-fig">{m(sv.totalShortReal)}</b> in total (today's money){" "}&#8212; additional cover of{" "}<b className="rep-gap-fig">{sv.closeGap === Infinity ? "more than " + m(20000000) : "approximately " + m(Math.ceil(sv.closeGap / 10000) * 10000)}</b> at death would close the gap</>
                             }.
                           </p>
                         );
