@@ -119,21 +119,32 @@ const taxDefault = () => ({
   enabled: false,
   cgtRate: 0,
   periods: [{ id: uid(), label: "Tax-free", startMode: "now", startAge: 0, personalAllowance: 0, bands: [] }],
-  estate: { enabled: false, nrb: 0, rnrb: 0, rate: 40, transferableNrb: true },
+  estate: { enabled: false, nrb: 0, rnrb: 0, rate: 40, transferableNrb: true, taperThreshold: 2000000 },
 });
 // Estate / succession tax — deliberately simplified for illustration. Flat allowance + single rate
-// above it; no RNRB taper on large estates, no lifetime-gift history, no business/agricultural relief.
+// above it, no lifetime-gift history, no business/agricultural relief. The UK residence nil-rate
+// band taper IS modelled when a taper threshold is set (the UK preset sets £2,000,000).
 // Couples: models the SECOND death only (spouse transfers are typically exempt), with an optional
 // transferable allowance so the survivor's estate carries both nil-rate bands.
 function computeEstate(grossEstate, est, isCouple) {
   const gross = Math.max(0, Number(grossEstate) || 0);
-  if (!est || !est.enabled) return { gross, allowance: 0, taxable: 0, tax: 0, net: gross, applied: false };
-  const baseAllow = (Number(est.nrb) || 0) + (Number(est.rnrb) || 0);
-  const allowance = isCouple && est.transferableNrb !== false ? baseAllow * 2 : baseAllow;
+  if (!est || !est.enabled) return { gross, allowance: 0, taxable: 0, tax: 0, net: gross, applied: false, rnrbTapered: 0 };
+  const mult = isCouple && est.transferableNrb !== false ? 2 : 1;
+  const nrb = (Number(est.nrb) || 0) * mult;       // standard nil-rate band — never tapered
+  let rnrb = (Number(est.rnrb) || 0) * mult;       // residence nil-rate band — tapered on large estates
+  // Residence nil-rate band taper: lose £1 of RNRB for every £2 the estate exceeds the threshold
+  // (UK: £2,000,000, tested against the second-death estate). Only applies when a threshold is set.
+  const taperThreshold = Number(est.taperThreshold) || 0;
+  let rnrbTapered = 0;
+  if (taperThreshold > 0 && rnrb > 0 && gross > taperThreshold) {
+    rnrbTapered = Math.min(rnrb, (gross - taperThreshold) / 2);
+    rnrb -= rnrbTapered;
+  }
+  const allowance = nrb + rnrb;
   const rate = Math.min(100, Math.max(0, Number(est.rate) || 0)) / 100;
   const taxable = Math.max(0, gross - allowance);
   const tax = taxable * rate;
-  return { gross, allowance, taxable, tax, net: gross - tax, applied: true };
+  return { gross, allowance, taxable, tax, net: gross - tax, applied: true, rnrbTapered };
 }
 // Starting points only — the adviser verifies and edits the current rates. Not a maintained library.
 const TAX_PRESETS = {
@@ -226,7 +237,7 @@ const SEED = {
     client1: { name: "Adam Reyes", dob: "1977-04-12", retirementAge: 60, lifeExpectancy: 93 },
     client2: { name: "Sara Reyes", dob: "1980-09-20", retirementAge: 60, lifeExpectancy: 95 },
   },
-  assumptions: { inflation: 2.5, survivorExpenseFactor: 67, tax: taxDefault() },
+  assumptions: { inflation: 2.5, survivorExpenseFactor: 67, liquidationOrder: ["cash", "investment", "pension", "property"], tax: taxDefault() },
   assets: [
     { id: uid(), name: "Cash reserve", type: "cash", value: 150000, growthRate: 1.5, drawdown: true, owner: "joint", contribution: contribDefault() },
     { id: uid(), name: "Offshore Bond", type: "investment", value: 450000, growthRate: 5, drawdown: true, owner: "joint", offshoreBond: true, contribution: contribDefault() },
@@ -415,6 +426,16 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     return a ? a.id : surplusDest();
   };
   const bucketOf = (o) => (o === "client2" ? "client2" : o === "joint" ? "joint" : "client1");
+
+  // Adviser-controlled liquidation order — the order pots are drained to cover a shortfall.
+  // Defaults to cash → investment → pension → property; the adviser can reorder (e.g. pension last
+  // for estate reasons). Any types missing from a saved order are appended so all are always covered.
+  const DRAW_TYPES = ["cash", "investment", "pension", "property"];
+  const liqOrder = (() => {
+    const saved = Array.isArray(assumptions.liquidationOrder) ? assumptions.liquidationOrder.filter((t) => DRAW_TYPES.includes(t)) : [];
+    DRAW_TYPES.forEach((t) => { if (!saved.includes(t)) saved.push(t); });
+    return saved;
+  })();
 
   const rows = [];
   let prevAliveC1 = true, prevAliveC2 = true;
@@ -606,7 +627,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
 
     const drawList = () => {
       const out = [];
-      ["cash", "investment", "pension", "property"].forEach((type) => {
+      liqOrder.forEach((type) => {
         assets.filter((a) => a.type === type && a.drawdown).forEach((a) => {
           if (type === "pension") {
             const o = a.owner || "client1";
@@ -1219,8 +1240,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       o.sTotal = dz(sr.total);
       o.sInvestable = dz(sr.total - sr.property);
       o.sDebt = dz(sr.debt || 0);
+      o.sNeg = Math.min(0, o.stressed);
       assets.forEach((a) => (o["s_" + aKey(a.id)] = dz(sr[aKey(a.id)] || 0)));
     }
+    o.nwNeg = Math.min(0, o.netWorth);
     if (compareMap && compareMap.has(r.year)) o.cmp = compareMap.get(r.year);
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
@@ -1230,6 +1253,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     o.uncovered = dz(flow.shortfall);
     return o;
   }), [rows, showReal, inflDec, assets, incomes, stressRows, compareMap]);
+
+  // True when net worth (or the stressed line) dips below £0 — i.e. debts outlive assets and the
+  // plan goes underwater. Drives the red below-zero fill and the £0 baseline on the net worth chart.
+  const nwHasNeg = useMemo(() => data.some((d) => d.netWorth < 0 || (d.stressed != null && d.stressed < 0)), [data]);
 
   const stressImpact = useMemo(() => {
     if (!stressRows) return null;
@@ -2124,6 +2151,28 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </div>
                   );
                 })()}
+                {(() => {
+                  const DT = ["cash", "investment", "pension", "property"];
+                  const order = (() => { const saved = Array.isArray(assumptions.liquidationOrder) ? assumptions.liquidationOrder.filter((x) => DT.includes(x)) : []; DT.forEach((x) => { if (!saved.includes(x)) saved.push(x); }); return saved; })();
+                  const move = (i, dir) => { const j = i + dir; if (j < 0 || j >= order.length) return; const next = order.slice(); [next[i], next[j]] = [next[j], next[i]]; setAssumptions((a) => ({ ...a, liquidationOrder: next })); };
+                  const btn = (dis) => ({ cursor: dis ? "default" : "pointer", border: "1px solid var(--border)", background: "var(--card)", borderRadius: 6, width: 26, height: 26, fontSize: 13, lineHeight: "1", color: "var(--ink)", opacity: dis ? 0.3 : 1 });
+                  return (
+                  <div className="liq-order" style={{ marginTop: 14 }}>
+                    <label className="flbl">When money's needed, draw from pots in this order <InfoTip text="When spending exceeds income, the plan drains these pot types in this order until the need is met. Order matters for tax and estate planning — e.g. drawing investments before pensions can leave more in the pension, which often passes on more efficiently. Only pots marked 'available for drawdown' are ever touched, and pensions only once the owner reaches retirement age." /></label>
+                    <div className="liq-rows">
+                      {order.map((type, i) => (
+                        <div key={type} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 9, marginTop: 6 }}>
+                          <span style={{ width: 18, textAlign: "center", fontWeight: 700, color: "var(--mid)", fontSize: 12 }}>{i + 1}</span>
+                          <span style={{ flex: 1, fontWeight: 600 }}>{TYPE_LABEL[type]}</span>
+                          <button type="button" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move earlier" style={btn(i === 0)}>↑</button>
+                          <button type="button" disabled={i === order.length - 1} onClick={() => move(i, 1)} aria-label="Move later" style={btn(i === order.length - 1)}>↓</button>
+                        </div>
+                      ))}
+                    </div>
+                    <span className="field-note">Drained first to last until spending is covered. The default puts cash first and pensions late, which suits most estate-planning goals.</span>
+                  </div>
+                  );
+                })()}
                 <div className="risk-block">
                   <label className="flbl">Risk profiles <InfoTip text="Picking a profile applies its growth rates to every asset that person owns — Cautious 3%, Balanced 5%, Growth 6.5%, Aggressive 8% on investments and pensions, with cash and property scaled to match. You can still fine-tune any individual asset afterwards; the label will show 'edited' so you know it no longer matches the template." /></label>
                   {riskOwnerKeys.map((k) => (
@@ -2230,7 +2279,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <Toggle on={est.enabled} onClick={() => setEstate({ enabled: !est.enabled })} />
                   </div>
                   {est.enabled && (<>
-                    <div className="tax-presets"><span>Preset:</span><button onClick={() => setEstate({ nrb: 325000, rnrb: 175000, rate: 40, transferableNrb: true })}>UK IHT 2025/26</button><button onClick={() => setEstate({ nrb: 0, rnrb: 0, rate: 0 })}>Clear</button></div>
+                    <div className="tax-presets"><span>Preset:</span><button onClick={() => setEstate({ nrb: 325000, rnrb: 175000, rate: 40, transferableNrb: true, taperThreshold: 2000000 })}>UK IHT 2025/26</button><button onClick={() => setEstate({ nrb: 0, rnrb: 0, rate: 0, taperThreshold: 0 })}>Clear</button></div>
                     <div className="field"><label>Tax-free allowance (nil-rate band)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.nrb} step={5000} onCommit={(v) => setEstate({ nrb: v })} /></div><span className="field-note">The amount passing free of tax. The UK nil-rate band is {sym}325,000.</span></div>
                     <div className="field"><label>Residence allowance (optional)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.rnrb} step={5000} onCommit={(v) => setEstate({ rnrb: v })} /></div><span className="field-note">UK residence nil-rate band ({sym}175,000) where a main home passes to direct descendants. Leave at 0 if it doesn't apply.</span></div>
                     <div className="field"><label>Tax rate above the allowance</label><Mini value={est.rate} suffix="%" onChange={(v) => setEstate({ rate: Math.min(100, Math.max(0, Number(v) || 0)) })} /></div>
@@ -2239,11 +2288,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       <div className="estate-preview">
                         <div className="estate-prev-row"><span>Projected estate at plan end ({kpis.endYear})</span><b className="num">{fmtFull(ec.gross, cur)}</b></div>
                         <div className="estate-prev-row"><span>Tax-free allowance{couple && est.transferableNrb !== false ? " (both partners)" : ""}</span><b className="num">{fmtFull(ec.allowance, cur)}</b></div>
+                        {ec.rnrbTapered > 0 && <div className="estate-prev-row" style={{ fontSize: 12, opacity: 0.75 }}><span>Residence band tapered (estate over {fmtFull(Number(est.taperThreshold) || 0, cur)})</span><b className="num">−{fmtFull(ec.rnrbTapered, cur)}</b></div>}
                         <div className="estate-prev-row estate-prev-tax"><span>Estimated tax</span><b className="num">{ec.tax > 0 ? "−" : ""}{fmtFull(ec.tax, cur)}</b></div>
                         <div className="estate-prev-row estate-prev-net"><span>Net to beneficiaries</span><b className="num">{fmtFull(ec.net, cur)}</b></div>
                       </div>
                     ); })()}
-                    <p className="tax-disclaimer">A simplified illustration: a flat allowance and single rate on the end-of-plan estate, in today's money. It does not model allowance taper on large estates, lifetime gifts, trusts, or business and agricultural relief. Not tax or estate-planning advice.</p>
+                    <p className="tax-disclaimer">A simplified illustration: a flat allowance and single rate on the end-of-plan estate, in today's money. It applies the residence-band taper on large estates but does not model lifetime gifts, trusts, or business and agricultural relief. Not tax or estate-planning advice.</p>
                   </>)}
                 </div>
               </div>
@@ -2628,6 +2678,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {hasProperty && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sInvestable" : "investable"} stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
                   {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.6} strokeDasharray="9 5" strokeOpacity={0.55} dot={false} isAnimationActive={false} />}
+                  {nwHasNeg && <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sNeg" : "nwNeg"} baseValue={0} stroke="none" fill={t.red} fillOpacity={0.22} isAnimationActive={false} />}
+                  {nwHasNeg && <ReferenceLine y={0} stroke={t.red} strokeWidth={1.2} strokeOpacity={0.7} />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 70% 42%)" strokeWidth={2.5} dot={{ r: 2, fill: "hsl(185 70% 42%)", strokeWidth: 0 }} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
@@ -2778,7 +2830,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           {
             const ec = computeEstate(goal.estateEnd, est, couple);
             if (ec.applied) {
-              cards.push({ Icon: Landmark, verdict: "info", q: "What will I leave behind?", text: <>The projected estate at the end of the plan ({goal.estateEndYear}) is about <b>{m(ec.gross)}</b>{hasProperty ? ", including any property still held" : ""}. After a tax-free allowance of {m(ec.allowance)}{couple && est.transferableNrb !== false ? " (both partners' allowances combined)" : ""}, estimated succession tax is about <b>{m(ec.tax)}</b>, leaving roughly <b>{m(ec.net)}</b> to beneficiaries.</>, note: "In today's money, before any funeral or administration costs. A simplified flat-allowance, single-rate illustration set in Tax & Jurisdiction — it ignores allowance taper, lifetime gifts, trusts and reliefs. Not estate-planning advice." });
+              cards.push({ Icon: Landmark, verdict: "info", q: "What will I leave behind?", text: <>The projected estate at the end of the plan ({goal.estateEndYear}) is about <b>{m(ec.gross)}</b>{hasProperty ? ", including any property still held" : ""}. After a tax-free allowance of {m(ec.allowance)}{couple && est.transferableNrb !== false ? " (both partners' allowances combined)" : ""}, estimated succession tax is about <b>{m(ec.tax)}</b>, leaving roughly <b>{m(ec.net)}</b> to beneficiaries.</>, note: "In today's money, before any funeral or administration costs. A simplified flat-allowance, single-rate illustration set in Tax & Jurisdiction — it applies the residence-band taper on large estates but ignores lifetime gifts, trusts and reliefs. Not estate-planning advice." });
             } else {
               cards.push({ Icon: Landmark, verdict: "info", q: "How much could I leave behind?", text: `The plan is projected to leave about ${m(goal.estateEnd)} at the end of the plan (${goal.estateEndYear})${hasProperty ? ", including any property still held" : ""}.`, note: "In today's money (real terms). Before any inheritance or succession tax — switch on Estate & succession tax in Tax & Jurisdiction to estimate that. Based on current assumptions with no changes." });
             }
@@ -3650,7 +3702,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <tr><td><b>Net to beneficiaries</b></td><td className="r num"><b>{m(ec.net)}</b></td></tr>
                         </tbody>
                       </table>
-                      <p className="rep-p rep-small">A simplified flat-allowance, single-rate illustration. It does not model allowance taper on large estates, lifetime gifts, trusts, or business and agricultural relief, and assumes the whole estate is within scope of this tax. Not estate-planning advice.</p>
+                      <p className="rep-p rep-small">A simplified flat-allowance, single-rate illustration. It applies the residence-band taper on large estates but does not model lifetime gifts, trusts, or business and agricultural relief, and assumes the whole estate is within scope of this tax. Not estate-planning advice.</p>
                     </>); })()}
                     <p className="rep-p rep-small">Tax figures are illustrative estimates based on user-defined assumptions and should not be relied upon as tax advice. Tax treatment depends on individual circumstances and the rules of each jurisdiction, which change over time. Advice should be obtained from a qualified tax specialist.</p>
                     <RepFoot />
