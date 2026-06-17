@@ -223,7 +223,15 @@ function volByTypeFor(assets, levelMult) {
   ["cash", "investment", "pension", "property"].forEach((t) => {
     const rates = assets.filter((a) => a.type === t).map((a) => Number(a.growthRate) || 0);
     const g = rates.length ? rates.reduce((s, x) => s + x, 0) / rates.length : 0;
-    out[t] = Math.max(FLOOR[t], Math.min(CEIL[t] * levelMult, g * (K[t] || 1.5) * levelMult));
+    // Floor/ceiling define the realistic volatility band at the CENTRAL (Typical) assumption; the
+    // Lower/Typical/Higher knob then scales that band. The floor is applied BEFORE the knob, not
+    // after — otherwise, for a low-growth asset, the growth-derived volatility sits under the floor
+    // at every knob setting, the floor clamps all three to the same value, and the knob silently
+    // does nothing (e.g. an investment modelled at ~2% growth pinned to 6% at Lower/Typical/Higher
+    // alike). Scaling the floored central value keeps Typical at the prudent minimum while letting
+    // the knob move. Where the floor/ceiling aren't binding at Typical this is identical to before.
+    const central = Math.max(FLOOR[t], Math.min(CEIL[t], g * (K[t] || 1.5)));
+    out[t] = central * levelMult;
   });
   return out;
 }
@@ -2221,7 +2229,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           {!retGoalCalc.onTrack && retGoalCalc.yearsToRet === 0 && <div className="goalp-row"><span></span><span className="inl-note">Already at retirement — close the gap with additional capital or a lower income target.</span></div>}
                           <div className="goalp-row"><span>Drawing {fmtFull(retGoalCalc.target, cur)}/yr, the pot alone</span><b className="num">{retGoalCalc.sustainable ? "is self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "—"}</b></div>
                         </div>
-                        <span className="field-note">Today's money. "Investable capital" excludes property. The longevity line draws the target income from the projected pot alone (growing at the plan's blended real return) — other income sources aren't counted, so it's a deliberately conservative sanity check. Extra saving assumes the same return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
+                        <span className="field-note">Today's money; 'investable capital' excludes property. The 'lasts to ~age' figure is a rule-of-thumb: it assumes the pot is invested for income at the real return of your investments and pensions — or a balanced default if the plan holds none — and is drawn down on its own, with no other income counted. Because it ignores your actual asset mix and other income, it can differ from the plan's own year-by-year projection, which is the figure to rely on. Extra saving assumes the same return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
                         <span className="field-note" style={{marginTop:4,paddingTop:4,borderTop:"1px solid var(--border)",opacity:0.75}}>This is a <b>capital check</b> — it asks whether the pot at retirement hits a target number. The <b>What-if panel</b> runs a full lifetime simulation year by year, including all income and contributions, so the two can give different verdicts for the same plan. Both are valid; they answer different questions.</span>
                       </div>
                     )}
@@ -3599,7 +3607,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <tr><td>Pot alone, drawing {m(retGoalCalc.target)}/yr</td><td className="r num">{retGoalCalc.sustainable ? "self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "\u2014"}</td></tr>
                         </tbody>
                       </table>
-                      <p className="rep-p rep-small">Figures in today's money; investable capital excludes property. The required capital applies the stated withdrawal rate as a rule of thumb — it is a planning illustration, not a recommendation or a guarantee of sustainable income.</p>
+                      <p className="rep-p rep-small">Figures in today's money; investable capital excludes property. The required capital applies the stated withdrawal rate as a rule of thumb. The 'pot alone, lasts to ~age' line assumes the pot is invested for income at the real return of any investments and pensions (or a balanced default if none) and drawn on its own, with no other income — so it can differ from the plan's full year-by-year projection elsewhere in this report. A planning illustration, not a recommendation or a guarantee of sustainable income.</p>
                     </>)}
                     <RepFoot />
                   </section>
