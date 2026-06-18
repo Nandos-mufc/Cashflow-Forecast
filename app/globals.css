@@ -35,14 +35,14 @@
 html, body {
   margin: 0;
   padding: 0;
-  min-height: 100%;
+  height: 100%;
   background: var(--bg);
   color: var(--ink);
   font-family: "Manrope", ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-#__next, body > div { min-height: 100%; }
+#__next, body > div { height: 100%; }
 
 a { color: inherit; text-decoration: none; }
 
@@ -93,7 +93,7 @@ a { color: inherit; text-decoration: none; }
 .auth-switch button { border: none; background: none; color: var(--accent); font-weight: 600; cursor: pointer; font-family: inherit; font-size: 12.5px; }
 
 /* ---- Plan editor top bar ---- */
-.plan-shell { min-height: 100%; display: flex; flex-direction: column; }
+.plan-shell { height: 100%; display: flex; flex-direction: column; }
 .plan-bar { display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--card); }
 .plan-bar .name { font-weight: 600; font-size: 14px; }
 .plan-bar .save { margin-left: auto; font-size: 12px; color: var(--low); display: flex; align-items: center; gap: 6px; }
@@ -101,5 +101,5 @@ a { color: inherit; text-decoration: none; }
 .save-dot.saving { background: #e3a008; }
 .save-dot.saved { background: #2e9e6b; }
 .save-dot.error { background: var(--red); }
-.plan-body { flex: 1 0 auto; }
+.plan-body { flex: 1; min-height: 0; }
 .plan-pill { font-size: 11px; font-weight: 700; letter-spacing: .02em; background: var(--accent-soft, #eef3fb); color: var(--accent, #23436e); border-radius: 6px; padding: 3px 8px; }
