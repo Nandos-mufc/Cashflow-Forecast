@@ -4061,7 +4061,7 @@ const CSS = `
 .del-row{display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:1px solid var(--border);color:var(--low);border-radius:8px;padding:8px;font-size:12px;font-family:inherit;cursor:pointer;}
 .del-row:hover{color:var(--red);border-color:var(--red);}
 
-.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;}
+.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;position:sticky;top:64px;align-self:start;max-height:calc(100vh - 64px);overflow-y:auto;}
 .app.present .chartwrap{padding:22px 36px;gap:16px;}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px;box-shadow:var(--shadow);}
