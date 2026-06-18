@@ -2688,7 +2688,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.6} strokeDasharray="9 5" strokeOpacity={0.55} dot={false} isAnimationActive={false} />}
                   {nwHasNeg && <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sNeg" : "nwNeg"} baseValue={0} stroke="none" fill={t.red} fillOpacity={0.22} isAnimationActive={false} />}
                   {nwHasNeg && <ReferenceLine y={0} stroke={t.red} strokeWidth={1.2} strokeOpacity={0.7} />}
-                  {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 70% 42%)" strokeWidth={2.5} dot={{ r: 2, fill: "hsl(185 70% 42%)", strokeWidth: 0 }} isAnimationActive={false} />}
+                  {compareMap && <Line type="monotone" dataKey="cmp" stroke={t.panel} strokeWidth={5} dot={false} isAnimationActive={false} />}
+                  {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 80% 44%)" strokeWidth={2.6} dot={false} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
                 </ComposedChart>
               </ResponsiveContainer>
@@ -3775,7 +3776,7 @@ function InfoTip({ text }) {
 /*  STYLES                                                            */
 /* ================================================================== */
 const CSS = `
-.app-root{font-family:'Manrope',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);height:100%;min-height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
+.app-root{font-family:'Manrope',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);min-height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
 .app-root *{box-sizing:border-box;}
 .num{font-family:'Manrope',ui-sans-serif,sans-serif;font-variant-numeric:tabular-nums;}
 /* Micro-interactions — shared press/hover feel across every action control */
@@ -3799,7 +3800,7 @@ const CSS = `
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent-strong);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{display:grid;grid-template-columns:204px 360px 1fr;grid-template-rows:minmax(0,1fr);flex:1;min-height:0;}
+.app{display:grid;grid-template-columns:204px 360px 1fr;align-items:start;}
 .app.present{grid-template-columns:1fr;}
 
 .rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;}
@@ -3817,7 +3818,7 @@ const CSS = `
 .tab{display:flex;align-items:center;gap:6px;white-space:nowrap;background:var(--bg);border:1px solid var(--border);color:var(--mid);padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:500;font-family:inherit;cursor:pointer;}
 .tab.active{background:var(--accent-strong);color:#fff;border-color:var(--accent-strong);}
 
-.editor{border-right:1px solid var(--border);background:var(--panel);overflow-y:auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
+.editor{border-right:1px solid var(--border);background:var(--panel);overflow:visible;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
 .editor::-webkit-scrollbar,.rail::-webkit-scrollbar,.chartwrap::-webkit-scrollbar,.modal::-webkit-scrollbar,.notes-area::-webkit-scrollbar{width:8px;height:8px;}
 .editor::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb,.chartwrap::-webkit-scrollbar-thumb,.modal::-webkit-scrollbar-thumb,.notes-area::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box;}
 .editor::-webkit-scrollbar-thumb:hover{background:var(--low);border:2px solid transparent;background-clip:content-box;}
@@ -4060,7 +4061,7 @@ const CSS = `
 .del-row{display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:1px solid var(--border);color:var(--low);border-radius:8px;padding:8px;font-size:12px;font-family:inherit;cursor:pointer;}
 .del-row:hover{color:var(--red);border-color:var(--red);}
 
-.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;overflow-y:auto;min-height:0;position:sticky;top:0;align-self:start;max-height:100vh;}
+.chartwrap{padding:18px 20px;display:flex;flex-direction:column;gap:13px;min-width:0;}
 .app.present .chartwrap{padding:22px 36px;gap:16px;}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px;box-shadow:var(--shadow);}
