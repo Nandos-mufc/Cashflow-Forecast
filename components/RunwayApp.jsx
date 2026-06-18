@@ -2711,6 +2711,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {showComposition
                     ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
+                  {(stress || ci || survivorOverlay) && <Area type="monotone" dataKey={(d) => Math.max(0, d.stressed || 0)} stackId="sgap" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {(stress || ci || survivorOverlay) && <Area type="monotone" dataKey={(d) => Math.max(0, (d.netWorth || 0) - Math.max(0, d.stressed || 0))} stackId="sgap" stroke="none" fill={t.red} fillOpacity={0.12} isAnimationActive={false} legendType="none" tooltipType="none" />}
                   {hasProperty && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sInvestable" : "investable"} stroke={t.line} strokeWidth={1.6} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
                   {hasDebt && showComposition && <Line type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.ink} strokeWidth={1.8} dot={false} isAnimationActive={false} />}
                   {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.6} strokeDasharray="9 5" strokeOpacity={0.55} dot={false} isAnimationActive={false} />}
@@ -3254,7 +3256,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Cover + verdict */}
                 <section className="report-page">
                   <div className="rep-cover">
-                    <div className="rep-cover-mark"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 20 L9 12 L13 15 L21 4" fill="none" stroke="#2e9e6b" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /><circle cx="21" cy="4" r="2.3" fill="#2e9e6b" /></svg> Cashflow plan</div>
+                    <div className="rep-cover-brand"><svg viewBox="0 0 48 54" width="26" height="29" fill="none" aria-hidden="true"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="6" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.2" fill="#C8A951" /></svg><span className="rep-cover-word">Meridian</span><span className="rep-cover-kicker">Cashflow plan</span></div>
                     <h1 className="rep-h1">{clientName}</h1>
                     <div className="rep-meta">Prepared {reportDate}{reportCfg.adviser ? ` by ${reportCfg.adviser}` : ""}{reportCfg.firm ? `, ${reportCfg.firm}` : ""} · Figures in {basis} · Currency {cur}</div>
                   </div>
@@ -4305,14 +4307,17 @@ const CSS = `
 .report-overlay{position:fixed;inset:0;z-index:300;background:#f3f4f6;overflow:auto;color:#1a1f28;font-family:"Manrope",ui-sans-serif,system-ui,sans-serif;}
 .report-toolbar{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 18px;background:#fff;border-bottom:1px solid #e2e6ec;}
 .report-tb-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;}
-.report-sheet{max-width:820px;margin:22px auto;background:#fff;border:1px solid #e2e6ec;border-radius:6px;padding:46px 52px;box-shadow:0 8px 30px rgba(20,30,50,.06);}
+.report-sheet{max-width:820px;margin:22px auto;background:#fff;border:1px solid #e2e6ec;border-top:3px solid #C8A951;border-radius:6px;padding:46px 52px;box-shadow:0 8px 30px rgba(20,30,50,.06);}
 .report-page{padding-bottom:34px;margin-bottom:34px;border-bottom:1px solid #eef1f4;}
 .report-page.report-last{border-bottom:none;margin-bottom:0;}
 .rep-cover{margin-bottom:26px;}
-.rep-cover-mark{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:#2e9e6b;letter-spacing:.02em;text-transform:uppercase;}
+.rep-cover-brand{display:flex;align-items:center;gap:9px;}
+.rep-cover-word{font-weight:700;font-size:19px;letter-spacing:-.02em;color:#102A43;}
+.rep-cover-kicker{font-weight:600;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#0CA5A5;padding-left:9px;border-left:1px solid #d9dee5;}
 .rep-h1{font-family:"Manrope",Georgia,serif;font-size:34px;font-weight:600;margin:10px 0 6px;letter-spacing:-.01em;}
 .rep-meta{font-size:12.5px;color:#7a8493;}
-.rep-h2{font-family:"Manrope",Georgia,serif;font-size:19px;font-weight:600;margin:0 0 4px;}
+.rep-h2{position:relative;padding-left:13px;font-family:"Manrope",ui-sans-serif,sans-serif;font-size:19px;font-weight:700;margin:0 0 4px;color:#102A43;}
+.rep-h2::before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:3px;border-radius:2px;background:#0CA5A5;}
 .rep-h3{font-family:"Manrope",Georgia,serif;font-size:15px;font-weight:600;margin:0 0 4px;}
 .rep-p{font-size:12.5px;color:#5b6573;margin:0 0 14px;line-height:1.5;}
 .rep-verdict{border-radius:11px;padding:16px 18px;margin-bottom:22px;border:1px solid;}
