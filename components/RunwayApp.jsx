@@ -100,6 +100,10 @@ const DEATH_MODES = [
   { value: "cease", label: "Ceases" },
   { value: "continue", label: "Continues to survivor" },
 ];
+const TAXTREAT = [
+  { value: "net", label: "Net / take-home" },
+  { value: "gross", label: "Gross / taxable" },
+];
 const CURRENCIES = {
   GBP: { code: "GBP", symbol: "£" },
   USD: { code: "USD", symbol: "$" },
@@ -118,7 +122,7 @@ const deathDefault = () => ({ mode: "cease", pct: 50 });
 const taxDefault = () => ({
   enabled: false,
   cgtRate: 0,
-  periods: [{ id: uid(), label: "Tax-free", startMode: "now", startAge: 0, personalAllowance: 0, bands: [] }],
+  periods: [{ id: uid(), label: "Tax-free", startMode: "now", startAge: 0, personalAllowance: 0, bands: [], cgtRate: 0 }],
   estate: { enabled: false, nrb: 0, rnrb: 0, rate: 40, transferableNrb: true, taperThreshold: 2000000 },
 });
 // Estate / succession tax — deliberately simplified for illustration. Flat allowance + single rate
@@ -148,9 +152,9 @@ function computeEstate(grossEstate, est, isCouple) {
 }
 // Starting points only — the adviser verifies and edits the current rates. Not a maintained library.
 const TAX_PRESETS = {
-  none: { personalAllowance: 0, bands: [] },
-  uk: { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }] },
-  blank: { personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] },
+  none: { personalAllowance: 0, bands: [], cgtRate: 0 },
+  uk: { personalAllowance: 12570, bands: [{ upTo: 50270, rate: 20 }, { upTo: 125140, rate: 40 }, { upTo: "", rate: 45 }], cgtRate: 24 },
+  blank: { personalAllowance: 0, bands: [{ upTo: "", rate: 0 }], cgtRate: 0 },
 };
 /* ---- Stress testing ---------------------------------------------------------------------------
    Two families of scenario:
@@ -487,6 +491,25 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       income += v;
     });
 
+    // Gross / taxable income (e.g. a UK salary, or state/rental income after a move to the UK) is taxed
+    // in any residence period that has income-tax bands. Net-entered income is take-home and untouched —
+    // so existing plans (every income defaults to net) behave exactly as before. The taxed income also
+    // forms the base that later pension-pot withdrawals stack on, so the draw is taxed at the right
+    // marginal rate rather than starting from the personal allowance again.
+    const incPeriod = taxPeriodFor(c1Age, ctx.tax);
+    let grossTaxableIncome = 0;
+    incomes.forEach((i) => { if ((i.taxTreatment || "net") === "gross") grossTaxableIncome += incomeBy[i.id] || 0; });
+    const incomeTaxDue = incPeriod && grossTaxableIncome > 0 ? incomeTaxOf(grossTaxableIncome, incPeriod) : 0;
+    if (incomeTaxDue > 0) {
+      // Apportion the tax back across the gross streams so the money-in breakdown shows take-home by source.
+      incomes.forEach((i) => {
+        if ((i.taxTreatment || "net") !== "gross") return;
+        const cut = incomeTaxDue * ((incomeBy[i.id] || 0) / grossTaxableIncome);
+        incomeBy[i.id] = (incomeBy[i.id] || 0) - cut;
+      });
+      income -= incomeTaxDue;
+    }
+
     // expenditure for this year (pro-rated; death rules + survivor factor on joint)
     let expenditure = 0, expEssential = 0, expDiscretionary = 0, liabRepay = 0, premiums = 0;
     const expByOwner = { client1: 0, client2: 0, joint: 0 };
@@ -652,8 +675,8 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
 
     // Withdraw to net `need` from one asset, applying tax for the active period.
     // When period is null (tax off) every branch returns gross === net → identical to the old loop.
-    const period = taxPeriodFor(c1Age, ctx.tax);
-    const cgt = period ? Math.min(0.99, Math.max(0, (Number(ctx.tax.cgtRate) || 0) / 100)) : 0;
+    const period = incPeriod;
+    const cgt = period ? Math.min(0.99, Math.max(0, (Number(period.cgtRate != null ? period.cgtRate : ctx.tax.cgtRate) || 0) / 100)) : 0;
     const drawFrom = (a, need, taxableYr) => {
       const avail = bal[a.id];
       if (avail <= 0 || need <= 0) return { gross: 0, net: 0, taxable: 0 };
@@ -690,7 +713,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     };
 
     let shortfall = 0;
-    let taxPaid = 0;
+    let taxPaid = incomeTaxDue;
     if (incomeSurplus + plannedDraw >= 0) {
       // Spending is covered by income and/or the planned drawdown.
       // Reinvest only true income surplus; any planned drawdown beyond what spending needed is consumed.
@@ -720,7 +743,7 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
     } else {
       // Even after the planned drawdown, spending isn't fully covered — auto-draw the remainder.
       let need = -(incomeSurplus + plannedDraw);
-      let taxableYr = 0;
+      let taxableYr = grossTaxableIncome;
       for (const a of drawList()) {
         if (need <= 0) break;
         const r = drawFrom(a, need, taxableYr);
@@ -976,6 +999,9 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
           </div>
           {item.escalation === "custom" && kind === "expense" && (
             <div className="rec-field"><label>Priority</label><Pick value={item.priority} onChange={(v) => onChange({ priority: v })} options={PRIORITIES} /></div>
+          )}
+          {kind === "income" && (
+            <div className="rec-field"><label>Tax treatment <InfoTip text="Net / take-home is the default — the amount lands in the plan untaxed (right for UAE and other tax-free income, or anything you've already entered after tax). Choose Gross / taxable for income that should be taxed when a jurisdiction with income-tax bands is active — typically a UK salary, state pension or rental income from the point the client becomes UK-resident. It's only ever taxed in periods that have bands, so a gross income in a tax-free period still arrives in full." /></label><Pick value={item.taxTreatment || "net"} onChange={(v) => onChange({ taxTreatment: v })} options={TAXTREAT} />{(item.taxTreatment || "net") === "gross" && <span className="inl-note">taxed when a tax jurisdiction is active</span>}</div>
           )}
           {couple && kind === "income" && owner !== "joint" && (
             <div className="rec-grid">
@@ -1888,9 +1914,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const setTax = (p) => setAssumptions((a) => ({ ...a, tax: { ...(a.tax || taxDefault()), ...p } }));
   const setEstate = (p) => setTax({ estate: { ...est, ...p } });
   const upPeriod = (id, p) => setTax({ periods: tax.periods.map((x) => (x.id === id ? { ...x, ...p } : x)) });
-  const addPeriod = () => setTax({ periods: [...tax.periods, { id: uid(), label: "New jurisdiction", startMode: "age", startAge: Math.max(ectx.age0c1 + 1, 65), personalAllowance: 0, bands: [{ upTo: "", rate: 0 }] }] });
+  const addPeriod = () => setTax({ periods: [...tax.periods, { id: uid(), label: "New jurisdiction", startMode: "age", startAge: Math.max(ectx.age0c1 + 1, 65), personalAllowance: 0, bands: [{ upTo: "", rate: 0 }], cgtRate: 0 }] });
   const rmPeriod = (id) => setTax({ periods: tax.periods.filter((x) => x.id !== id) });
-  const applyPreset = (id, key) => upPeriod(id, { personalAllowance: TAX_PRESETS[key].personalAllowance, bands: TAX_PRESETS[key].bands.map((b) => ({ ...b })) });
+  const applyPreset = (id, key) => upPeriod(id, { personalAllowance: TAX_PRESETS[key].personalAllowance, bands: TAX_PRESETS[key].bands.map((b) => ({ ...b })), cgtRate: TAX_PRESETS[key].cgtRate });
   const upBand = (pid, idx, patch) => { const p = tax.periods.find((x) => x.id === pid); if (patch.rate != null) patch = { ...patch, rate: Math.min(99, Math.max(0, Number(patch.rate) || 0)) }; upPeriod(pid, { bands: p.bands.map((b, i) => (i === idx ? { ...b, ...patch } : b)) }); };
   const addBand = (pid) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: [...p.bands, { upTo: "", rate: 0 }] }); };
   const rmBand = (pid, idx) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: p.bands.filter((_, i) => i !== idx) }); };
@@ -2247,8 +2273,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </div>
                 {tax.enabled && (
                   <>
-                    <div className="field"><label>CGT on investment withdrawals <InfoTip text="A simplified effective rate applied to money drawn from investment pots (not cash, pensions or offshore bonds). Set 0 for ISAs or non-resident clients with no CGT. It's an approximation you control, not a full gain calculation — it taxes the whole withdrawal, not just the gain." /></label><Mini value={tax.cgtRate} suffix="%" onChange={(v) => setTax({ cgtRate: Math.min(99, Math.max(0, Number(v) || 0)) })} /></div>
-                    <div className="tax-tl-head">Residence timeline <InfoTip text={`Periods run in age order, anchored to ${couple ? fn1 + "'s" : "the client's"} age. The first starts now; add one to model a move — e.g. tax-free until 60, then UK rates from 60. Tax only affects years where money is withdrawn from pensions or investment pots, so accumulation years won't change.`} /></div>
+                    <div className="tax-tl-head">Residence timeline <InfoTip text={`Periods run in age order, anchored to ${couple ? fn1 + "'s" : "the client's"} age. The first starts now; add one to model a move — e.g. tax-free until 60, then UK rates from 60. Each period sets its own income-tax bands and CGT rate. Tax only affects years where money is withdrawn from pensions or investment pots, or where you've marked an income as gross/taxable.`} /></div>
                     {tax.periods.map((p, idx) => (
                       <div className="tax-period" key={p.id}>
                         <div className="tax-period-top">
@@ -2259,7 +2284,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           {tax.periods.length > 1 && <button className="rec-del" onClick={() => rmPeriod(p.id)}><Trash2 size={14} /></button>}
                         </div>
                         <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax (UAE/Gulf)</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "blank")}>Custom (blank)</button></div>
-                        <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
+                        <div className="rec-grid">
+                          <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
+                          <div className="rec-field"><label>CGT on investment drawdown <InfoTip text="Capital gains tax applied to money drawn from investment pots while in this jurisdiction (not cash, pensions or offshore bonds). Set 0 for a tax-free jurisdiction like the UAE, or for ISAs. A simplified effective rate you control — it taxes the whole withdrawal, not just the gain." /></label><Mini value={p.cgtRate != null ? p.cgtRate : tax.cgtRate} suffix="%" onChange={(v) => upPeriod(p.id, { cgtRate: Math.min(99, Math.max(0, Number(v) || 0)) })} /></div>
+                        </div>
                         <div className="tax-bands">
                           <div className="tax-bands-head"><span>Income up to</span><span>Rate</span><span /></div>
                           {p.bands.length === 0 && <div className="tax-band-empty">No income tax in this period.</div>}
@@ -2277,7 +2305,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     ))}
                     <button className="add-btn wide" onClick={addPeriod}><Plus size={15} /> Add a move / new jurisdiction</button>
                     <div className="tax-lifetime"><span>Lifetime tax in this plan</span><b className="num">{fmtFull(lifetimeTax, cur)}</b><em>{showReal ? "today's money" : "future money"} · updates live as you edit</em></div>
-                    <p className="ed-hint">Income you enter is treated as net (take-home), so it isn't taxed again — to model a move while still earning, enter two income rows with the net amounts for each country. Tax here applies to pension-pot withdrawals, investment drawdown (CGT), and offshore-bond gains above the 5% allowance. To compare jurisdictions side by side, duplicate this plan in Scenarios, change the residence timeline in the copy, and hit Compare.</p>
+                    <p className="ed-hint">By default each income is treated as net (take-home) and isn't taxed again. To model income that's taxable in a jurisdiction — a UK salary, state or rental income after a move — open the income and set its tax treatment to <b>Gross / taxable</b>; it's then taxed using the bands of whichever period is active. CGT on investment drawdown and offshore-bond gains above the 5% allowance follow the active period too. To compare jurisdictions side by side, duplicate this plan in Scenarios, change the residence timeline in the copy, and hit Compare.</p>
                     <p className="tax-disclaimer">Tax figures are illustrative estimates based on the assumptions you set above. They are not tax advice and should not be relied upon — tax treatment depends on individual circumstances and changes over time.</p>
                   </>
                 )}
@@ -3684,18 +3712,17 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <section className="report-page">
                     <h2 className="rep-h2">Tax overview</h2>
                     {assumptions.tax && assumptions.tax.enabled && (<>
-                      <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income entered in the plan is treated as net; tax applies to pension withdrawals, investment drawdown and offshore-bond gains.</p>
+                      <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income is treated as net unless marked gross/taxable; tax applies to gross income, pension withdrawals, investment drawdown and offshore-bond gains in periods where rates are set.</p>
                       <table className="rep-table">
-                        <thead><tr><th>Residence period</th><th>From</th><th className="r">Tax-free allowance</th><th className="r">Bands</th></tr></thead>
+                        <thead><tr><th>Residence period</th><th>From</th><th className="r">Tax-free allowance</th><th className="r">Income tax bands</th><th className="r">CGT</th></tr></thead>
                         <tbody>
                           {assumptions.tax.periods.map((p2, i) => (
-                            <tr key={p2.id}><td>{p2.label || "Period " + (i + 1)}</td><td>{i === 0 || p2.startMode === "now" ? "Start of plan" : `Age ${p2.startAge} (≈${baseYear + Math.max(0, Math.round((Number(p2.startAge) || 0) - ectx.age0c1))})`}</td><td className="r num">{m(Number(p2.personalAllowance) || 0)}</td><td className="r num">{p2.bands.length === 0 ? "No income tax" : p2.bands.map((b) => `${b.rate}%${b.upTo ? ` to ${fmtCompact(Number(b.upTo), cur)}` : "+"}`).join(" · ")}</td></tr>
+                            <tr key={p2.id}><td>{p2.label || "Period " + (i + 1)}</td><td>{i === 0 || p2.startMode === "now" ? "Start of plan" : `Age ${p2.startAge} (≈${baseYear + Math.max(0, Math.round((Number(p2.startAge) || 0) - ectx.age0c1))})`}</td><td className="r num">{m(Number(p2.personalAllowance) || 0)}</td><td className="r num">{p2.bands.length === 0 ? "No income tax" : p2.bands.map((b) => `${b.rate}%${b.upTo ? ` to ${fmtCompact(Number(b.upTo), cur)}` : "+"}`).join(" · ")}</td><td className="r num">{Number(p2.cgtRate != null ? p2.cgtRate : assumptions.tax.cgtRate) || 0}%</td></tr>
                           ))}
                         </tbody>
                       </table>
                       <table className="rep-table" style={{ marginTop: 14 }}>
                         <tbody>
-                          <tr><td>CGT on investment withdrawals</td><td className="r num">{Number(assumptions.tax.cgtRate) || 0}%</td></tr>
                           <tr><td><b>Lifetime tax over the plan</b></td><td className="r num"><b>{m(lifetimeTax)}</b></td></tr>
                         </tbody>
                       </table>
