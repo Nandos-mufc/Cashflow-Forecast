@@ -3076,13 +3076,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <CartesianGrid stroke={t.grid} vertical={false} />
                           <XAxis dataKey="year" tick={{ fill: t.mid, fontSize: 11 }} axisLine={{ stroke: t.grid }} tickLine={false} interval={Math.max(0, Math.floor(fanData.length / 9))} />
                           <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: t.mid, fontSize: 11 }} axisLine={false} tickLine={false} width={52} />
-                          <Area type="monotone" dataKey="band80" stroke="none" fill={t.accent} fillOpacity={0.14} isAnimationActive={false} />
-                          <Area type="monotone" dataKey="band50" stroke="none" fill={t.accent} fillOpacity={0.26} isAnimationActive={false} />
-                          <Line type="monotone" dataKey="p50" stroke={t.accent} strokeWidth={2.4} dot={false} isAnimationActive={false} />
+                          <Area type="monotone" dataKey="band80" stroke="none" fill={t.netStroke} fillOpacity={0.14} isAnimationActive={false} />
+                          <Area type="monotone" dataKey="band50" stroke="none" fill={t.netStroke} fillOpacity={0.26} isAnimationActive={false} />
+                          <Line type="monotone" dataKey="p50" stroke={t.netStroke} strokeWidth={2.4} dot={false} isAnimationActive={false} />
                           {retYear > baseYear && <ReferenceLine x={retYear} stroke={t.mid} strokeDasharray="3 3" label={{ value: "Retirement", position: "top", fill: t.mid, fontSize: 10 }} />}
                         </ComposedChart>
                       </ResponsiveContainer>
-                      <div className="mc-fan-key"><span><i style={{ background: t.accent, opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: t.accent, opacity: 0.14 }} /> Middle 80%</span><span><i className="mc-key-line" style={{ background: t.accent }} /> Median path</span></div>
+                      <div className="mc-fan-key"><span><i style={{ background: t.netStroke, opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: t.netStroke, opacity: 0.14 }} /> Middle 80%</span><span><i className="mc-key-line" style={{ background: t.netStroke }} /> Median path</span></div>
                     </div>
 
                     {endF && (
@@ -3251,6 +3251,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <button className="wi-reset" onClick={() => setReportOpen(false)}>Close</button>
                 </div>
               </div>
+              <div className="rep-runhead" aria-hidden="true"><span className="rep-rh-brand"><svg viewBox="0 0 48 54" width="15" height="17" fill="none"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="7" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.6" fill="#C8A951" /></svg>Meridian</span><span className="rep-rh-doc">{clientName} · Cashflow plan</span></div>
               <div className="report-sheet">
 
                 {/* Cover + verdict */}
@@ -4355,6 +4356,7 @@ const CSS = `
 .rep-empty{color:#9aa3b0;font-style:italic;}
 .rep-notes{margin:0;padding-left:18px;font-size:12.5px;color:#2a3038;line-height:1.7;}
 .rep-disc{font-size:11px;color:#7a8493;line-height:1.55;margin:0 0 10px;}
+.rep-runhead{display:none;}
 @media print {
   body * { visibility: hidden; }
   .report-overlay, .report-overlay * { visibility: visible; }
@@ -4364,7 +4366,10 @@ const CSS = `
   .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
   .report-page.report-last { page-break-after: auto; }
   .rep-table, .rep-kpi, .rep-chart, .rep-verdict { break-inside: avoid; }
-  @page { size: A4; margin: 16mm; }
+  .rep-runhead { display: flex; align-items: center; justify-content: space-between; position: fixed; top: 0; left: 0; right: 0; padding: 6px 15px 5px; background: #fff; border-bottom: 1px solid #e6e9ee; }
+  .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
+  .rep-rh-doc { font-size: 10px; color: #7a8493; }
+  @page { size: A4; margin: 20mm 16mm 16mm; }
 }
 .cash-head{margin-top:12px;border-top:1px solid var(--border);padding-top:11px;}
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
