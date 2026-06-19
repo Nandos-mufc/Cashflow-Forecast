@@ -1195,9 +1195,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // plan/chart path never triggers this — it is fully isolated from normal editing.
   const mcSig = useMemo(
     () => (mcOpen || (reportOpen && reportCfg.sections.mcconf))
-      ? JSON.stringify({ p: effProfile, a: effAssumptions, s: effAssets, i: incomes, e: expenses, l: liabilities, r: protection, ai: autoInvest, lv: mcLevel })
+      ? JSON.stringify({ p: effProfile, a: effAssumptions, s: effAssets, i: incomes, e: expenses, l: liabilities, r: protection, ai: autoInvest, lv: mcLevel, sov: survivorOverlay, ci, ciy: ciClaimYear })
       : "",
-    [mcOpen, reportOpen, reportCfg.sections.mcconf, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, mcLevel]
+    [mcOpen, reportOpen, reportCfg.sections.mcconf, effProfile, effAssumptions, effAssets, incomes, expenses, liabilities, protection, autoInvest, mcLevel, survivorOverlay, ci, ciClaimYear]
   );
   useEffect(() => {
     // Runs when: (a) the MC overlay is open, or (b) the report opens and the section is ticked but
@@ -1212,6 +1212,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const levelMult = (MC_LEVELS.find((l) => l.id === mcLevel) || MC_LEVELS[1]).mult;
     const vol = volByTypeFor(effAssets, levelMult);
     const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
+    // Apply the same STRUCTURAL overlay the chart is showing (critical-illness claim or survivor death)
+    // so "plan confidence" reflects the scenario on screen rather than the base plan. The deterministic
+    // market stress (e.g. 2008 crash) is deliberately NOT applied here: Monte Carlo already randomises
+    // returns across every future, so layering a fixed crash on top would double-count market risk.
+    let mcArgs = baseArgs;
+    if (ci) {
+      mcArgs = { ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear } };
+    } else if (survivorOverlay) {
+      const sovProf = { ...effProfile, [survivorOverlay.owner]: { ...effProfile[survivorOverlay.owner], lifeExpectancy: survivorOverlay.deathAge } };
+      const sovExp = survivorOverlay.essentialOnly ? expenses.filter((e) => (e.priority || "essential") !== "discretionary") : expenses;
+      mcArgs = { ...baseArgs, profile: sovProf, expenses: sovExp };
+    }
     const rng = mulberry32(MC_SEED), norm = makeNormal(rng);
     const N = MC_RUNS, CHUNK = 25;
     const cols = Array.from({ length: years }, () => new Float64Array(N));
@@ -1223,7 +1235,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       for (; i < end; i++) {
         const path = new Array(years);
         for (let y = 0; y < years; y++) path[y] = norm();
-        const rs = projectCashflow({ ...baseArgs, marketPath: path, volByType: vol });
+        const rs = projectCashflow({ ...mcArgs, marketPath: path, volByType: vol });
         let failed = false;
         for (let y = 0; y < years; y++) {
           const r = rs[y]; if (!r) continue;
@@ -1292,6 +1304,25 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // True when net worth (or the stressed line) dips below £0 — i.e. debts outlive assets and the
   // plan goes underwater. Drives the red below-zero fill and the £0 baseline on the net worth chart.
   const nwHasNeg = useMemo(() => data.some((d) => d.netWorth < 0 || (d.stressed != null && d.stressed < 0)), [data]);
+
+  // Base-only dataset for the printed report's main pages (net worth + money in/out). The on-screen
+  // `data` deliberately folds the active stress/death overlay into the money-in-out flow for live
+  // exploration — but the report documents the BASE plan throughout, with any scenario shown only on
+  // the dedicated stress-test page. Without this, a report generated while a death overlay was active
+  // showed base-plan net worth on one page and scenario shortfalls on the next: two stories, one plan.
+  const reportData = useMemo(() => rows.map((r) => {
+    const f = showReal ? Math.pow(1 + inflDec, r.y) : 1;
+    const dz = (v) => v / f;
+    const o = { year: r.year, y: r.y, c1Age: r.c1Age, c2Age: r.c2Age, total: dz(r.total), property: dz(r.property), investable: dz(r.total - r.property), debt: dz(r.debt || 0), netWorth: dz(r.total - (r.debt || 0)), income: dz(r.income), expenditure: dz(r.expenditure), contrib: dz(r.contrib || 0), outgoings: dz(r.expenditure + (r.contrib || 0)) };
+    o.nwNeg = Math.min(0, o.netWorth);
+    assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
+    incomes.forEach((i) => (o[iKey(i.id)] = dz((r.incomeBy && r.incomeBy[i.id]) || 0)));
+    o.plannedDraw = dz(r.plannedDraw || 0);
+    const gap = Math.max(0, (r.expenditure + (r.contrib || 0)) - r.income - (r.plannedDraw || 0));
+    o.coveredBySavings = dz(Math.max(0, gap - (r.shortfall || 0)));
+    o.uncovered = dz(r.shortfall || 0);
+    return o;
+  }), [rows, showReal, inflDec, assets, incomes]);
 
   const stressImpact = useMemo(() => {
     if (!stressRows) return null;
@@ -3233,14 +3264,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             ? `Based on the assumptions set out in this report, the plan remains fully funded throughout, with approximately ${m(kpis.endVal)} of net worth remaining at the end of the plan in ${kpis.endYear}.`
             : `Based on the assumptions set out in this report, spendable assets are projected to run short around ${kpis.depYear}${kpis.depName ? ` (${anon ? (kpis.depName === fn1 ? "Client 1" : "Client 2") : kpis.depName} aged ${kpis.depletionAge})` : ` (age ${kpis.depletionAge})`}. The size of the gap is sensitive to contributions, retirement age and planned spending.`;
           const longevity = kpis.depletionAge === null ? "Funded for life" : `Funds to age ${kpis.depletionAge}`;
-          const scenarioSuffix = survivorOverlay
-            ? ` — ${survivorOverlay.owner === "client2" ? dfn2 : dfn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}`
-            : ci
-              ? ` — CI · ${ci.owner === "client2" ? dfn2 : dfn1} age ${ci.age}`
-              : stressImpact && stressActive
-                ? ` — ${stressImpact.label}`
-                : "";
-          const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName}{scenarioSuffix} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
+          // The printed report documents the BASE plan throughout; any active stress/death scenario is
+          // shown only on the dedicated stress-test page, which names the scenario in its own body. The
+          // page footer therefore no longer carries the scenario name — previously it stamped e.g.
+          // "Mark dies age 47" onto base-plan pages, so "100% funded for life" read as a contradiction.
+          const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
           const RepHead = () => <div className="rep-runhead" aria-hidden="true"><span className="rep-rh-brand"><svg viewBox="0 0 48 54" width="14" height="16" fill="none"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="7" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.6" fill="#C8A951" /></svg>Meridian</span><span className="rep-rh-doc">{clientName} · Cashflow plan</span></div>;
           const assetMix = (() => { const by = {}; assets.forEach((a) => { by[a.type] = (by[a.type] || 0) + (Number(a.value) || 0); }); return Object.entries(by).filter(([, v]) => v > 0).map(([type, value]) => ({ type, value, name: TYPE_LABEL[type] })); })();
           const y0 = rows[0] || {}; const inc0 = y0.income || 0; const exp0 = y0.expenditure || 0;
@@ -3449,9 +3477,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <h2 className="rep-h2">Projected net worth</h2>
                   <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.{stressActive ? " A stress scenario is active — see the stress test page." : ""}</p>
                   <div className="rep-chart">
-                    <ComposedChart width={700} height={330} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                    <ComposedChart width={700} height={330} data={reportData} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
                         <CartesianGrid stroke="#eceff3" vertical={false} />
-                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
+                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(reportData.length / 9))} />
                         <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
                         {stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.9} isAnimationActive={false} />)}
                         {hasProperty && <Line type="monotone" dataKey="investable" stroke="#7a8493" strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
@@ -3478,9 +3506,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <h2 className="rep-h2">Money in versus money out</h2>
                   <p className="rep-p">Annual income by source against total spending (the line). Where spending exceeds income, the shortfall is drawn from savings.</p>
                   <div className="rep-chart">
-                    <ComposedChart width={700} height={330} data={data} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
+                    <ComposedChart width={700} height={330} data={reportData} margin={{ top: 8, right: 16, left: 8, bottom: 4 }}>
                         <CartesianGrid stroke="#eceff3" vertical={false} />
-                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(data.length / 9))} />
+                        <XAxis dataKey="year" tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={{ stroke: "#dfe3e9" }} tickLine={false} interval={Math.max(0, Math.floor(reportData.length / 9))} />
                         <YAxis tickFormatter={(v) => fmtCompact(v, cur)} tick={{ fill: "#6b7480", fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
                         {incomes.map((i) => <Bar key={i.id} dataKey={iKey(i.id)} stackId="mio" fill={incColors[i.id]} fillOpacity={0.9} isAnimationActive={false} />)}
                         <Bar dataKey="coveredBySavings" stackId="mio" fill="#e0a23a" fillOpacity={0.85} isAnimationActive={false} />
@@ -3492,7 +3520,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="rep-legend">
                     <span><i style={{ background: INCOME_LEGEND }} /> Income</span>
                     <span><i style={{ background: "#e0a23a" }} /> Drawn from savings</span>
-                    {reportCashGap && reportCashGap.uncoveredCount > 0 && <span><i style={{ background: "#d64545" }} /> Shortfall</span>}
+                    {reportData.some((d) => d.uncovered > 0) && <span><i style={{ background: "#d64545" }} /> Shortfall</span>}
                     <span><i className="rep-solid" /> Total spending</span>
                     {hasContrib && <span><i className="rep-dash" /> + savings/contributions</span>}
                   </div>
