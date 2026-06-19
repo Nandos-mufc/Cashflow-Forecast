@@ -42,6 +42,7 @@ import {
   StickyNote,
   Home,
   Activity,
+  PiggyBank,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -1794,6 +1795,16 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
     const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
     const fundedNow = funded(base);
+    // --- Margin of safety -------------------------------------------------------------------
+    // Everyday affordability answers (spend / retire / new monthly cost, and the fixes when a plan
+    // falls short) are reported with a built-in cushion, not at break-even: the plan must still fund
+    // even if every asset returned 1 point less than assumed. Stops the solvers handing back knife-edge
+    // figures. The one-off purchase card keeps its stricter 2pt + live-to-100 cushion (stressLiquid);
+    // longevity has its own card. Returns/inflation headroom cards stay at break-even — they ARE the
+    // resilience measure, so a cushion would double-count.
+    const cushion = (inp) => ({ ...inp, assets: inp.assets.map((a) => ({ ...a, growthRate: (Number(a.growthRate) || 0) - 1 })) });
+    const fundedSafe = (inp) => funded(cushion(inp));
+    const fundedSafeNow = fundedSafe(base);
     const retYearOff = Math.max(0, Math.max(ectx.retC1 - ectx.age0c1, (couple ? ectx.retC2 - ectx.age0c2 : 0)) + 1);
     const spendAtYear = (off) => {
       const infl = (Number(assumptions.inflation) || 0) / 100;
@@ -1833,11 +1844,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const ageNow2 = couple ? deriveAge((profile.client2 || {}).dob) : null;
     const c1Working = ageNow1 < ret1Base;
     const c2Working = couple && ageNow2 != null && ageNow2 < ret2Base;
-    const rTest = (d) => {
+    const rPlan = (d) => {
       const p1 = c1Working ? { ...profile.client1, retirementAge: ret1Base + d } : profile.client1;
       const p2 = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + d } : (profile.client2 || {});
-      return funded({ ...base, profile: { ...profile, client1: p1, ...(couple ? { client2: p2 } : {}) } });
+      return { ...base, profile: { ...profile, client1: p1, ...(couple ? { client2: p2 } : {}) } };
     };
+    const rTest = (d) => funded(rPlan(d));
+    const rTestSafe = (d) => fundedSafe(rPlan(d));
     let retire = null;
     if (!c1Working && !c2Working) { retire = 0; }
     else if (fundedNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTest(d - 1)) d--; retire = d; }
@@ -1849,6 +1862,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       const p2m = couple && c2Working ? { ...profile.client2, retirementAge: ret2Base + retire } : (profile.client2 || {});
       retireMargin = estateAtEnd({ ...base, profile: { ...profile, client1: p1m, ...(couple ? { client2: p2m } : {}) } });
     }
+    // Cushioned retirement: earliest age that holds with the 1-point return cushion (>= break-even age).
+    let retireSafe = null;
+    if (!c1Working && !c2Working) { retireSafe = 0; }
+    else if (fundedSafeNow) { let d = 0; const floor = Math.max(-25, ageNow1 - ret1Base); while (d > floor && rTestSafe(d - 1)) d--; retireSafe = d; }
+    else { let d = 1; while (d <= 25 && !rTestSafe(d)) d++; retireSafe = d <= 25 ? d : null; }
+    const earliestRetAgeSafe = retireSafe != null ? ret1Base + retireSafe : null;
 
     // Spending solver — only scale recurring lifestyle expenses, not one-offs (Session C accuracy fix).
     const recurringExp = expenses.filter((e) => e.frequency === "annual" || e.frequency === "monthly");
@@ -1858,6 +1877,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     if (fundedNow) { if (sTest(5)) spend = 5; else { let a = 1, b = 5; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; } }
     else if (sTest(0.1)) { let a = 0.1, b = 1; for (let i = 0; i < 26; i++) { const m = (a + b) / 2; if (sTest(m)) a = m; else b = m; } spend = a; }
     const maxSpend = spend != null && curSpend > 0 ? curSpend * spend : null;
+    // Cushioned spend multiplier across the full range (can sit below 1 if a cushion needs lower spend).
+    const sTestSafe = (f) => fundedSafe({ ...base, expenses: [...recurringExp.map((e) => ({ ...e, amount: (Number(e.amount) || 0) * f })), ...oneOffExp] });
+    let spendSafe = null;
+    if (sTestSafe(5)) spendSafe = 5;
+    else if (sTestSafe(0.1)) { let a = 0.1, b = 5; for (let i = 0; i < 30; i++) { const m = (a + b) / 2; if (sTestSafe(m)) a = m; else b = m; } spendSafe = a; }
+    const maxSpendSafe = spendSafe != null && curSpend > 0 ? curSpend * spendSafe : null;
 
     const tmpExp = (extra) => ({ ...base, expenses: [...expenses, extra] });
 
@@ -1874,6 +1899,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const mTest = (mo) => funded(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
     let maxMonthly = null;
     if (fundedNow) { let a = 0, b = 50000; if (mTest(b)) maxMonthly = b; else { for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (mTest(m)) a = m; else b = m; } maxMonthly = a; } }
+    const mTestSafe = (mo) => fundedSafe(tmpExp({ id: "tmp_m", name: "monthly", amount: mo, frequency: "monthly", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "discretionary", owner: "joint" }));
+    let maxMonthlySafe = null;
+    if (fundedNow) { let a = 0, b = 50000; if (mTestSafe(b)) maxMonthlySafe = b; else { for (let i = 0; i < 28; i++) { const m = (a + b) / 2; if (mTestSafe(m)) a = m; else b = m; } maxMonthlySafe = a; } }
 
     // Resilience + Inflation + Property
     const to100 = funded({ ...base, profile: { ...profile, client1: { ...profile.client1, lifeExpectancy: Math.max(100, Number(profile.client1.lifeExpectancy) || 0) }, client2: { ...profile.client2, lifeExpectancy: Math.max(100, Number(profile.client2.lifeExpectancy) || 0) } } });
@@ -1885,7 +1913,19 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     let propRelease = null;
     if (propVal > 0) { const invRates = assets.filter((a) => a.type === "investment").map((a) => Number(a.growthRate) || 0); const fbRates = assets.filter((a) => a.type === "investment" || a.type === "pension").map((a) => Number(a.growthRate) || 0); const investReturn = invRates.length ? invRates.reduce((s, r) => s + r, 0) / invRates.length : fbRates.length ? fbRates.reduce((s, r) => s + r, 0) / fbRates.length : (Number(assumptions.inflation) || 0) + 3; const released = assets.map((a) => (a.type === "property" ? { ...a, type: "investment", drawdown: true, growthRate: investReturn } : a)); const rRows = projectCashflow({ ...base, assets: released }); const rDep = rRows.find((r) => r.shortfall > 0); const lastY = Math.max(0, rRows.length - 1); const fAft = Math.pow(1 + baseInfl / 100, lastY); const rEstate = rRows.length ? Math.max(0, (rRows[lastY].total - (rRows[lastY].debt || 0))) / fAft : 0; const depAge = rDep ? (couple && !rDep.aliveC1 && rDep.aliveC2 ? rDep.c2Age : rDep.c1Age) : null; propRelease = { propVal, nowFunded: !rDep, depAge, estate: rEstate }; }
 
-    return { fundedNow, growth, growthCapped, retire, retireMargin, earliestRetAge, spend, maxSpend, curSpend, oneOff, maxMonthly, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
+    // Stop-saving: the regular (recurring) contributions currently being paid in, and whether the
+    // plan still funds with them switched off from today. Single-lever — spending, retirement age
+    // and income are left untouched.
+    const isRecurringContrib = (c) => !!(c && c.enabled && (c.frequency === "monthly" || c.frequency === "annual") && (Number(c.amount) || 0) > 0);
+    const contribAnnual = (c) => isRecurringContrib(c) ? (c.frequency === "monthly" ? (Number(c.amount) || 0) * 12 : (Number(c.amount) || 0)) : 0;
+    const totalContrib = assets.reduce((s, a) => s + contribAnnual(a.contribution), 0);
+    let stopSaving = null;
+    if (fundedNow && totalContrib > 0) {
+      const noSave = { ...base, assets: assets.map((a) => (isRecurringContrib(a.contribution) ? { ...a, contribution: { ...a.contribution, enabled: false } } : a)) };
+      stopSaving = { total: totalContrib, funded: funded(noSave), safe: fundedSafe(noSave) };
+    }
+
+    return { fundedNow, fundedSafeNow, growth, growthCapped, retire, retireMargin, earliestRetAge, retireSafe, earliestRetAgeSafe, spend, maxSpend, spendSafe, maxSpendSafe, curSpend, oneOff, maxMonthly, maxMonthlySafe, stopSaving, to100, baseInfl, inflMax, inflCapped, propRelease, estateEnd: kpis.endVal, estateEndYear: kpis.endYear };
   }, [goalOpen, reportOpen, profile, assumptions, assets, incomes, expenses, liabilities, protection, rows, kpis, ectx, couple]);
 
   const patch = (setter) => (id, p) => setter((prev) => prev.map((x) => (x.id === id ? { ...x, ...p } : x)));
@@ -2801,21 +2841,36 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           const spendBasisNote = smile
             ? "Spending follows your retirement-smile pattern — lifestyle (discretionary) spend eases in later retirement, which the solver applies. Essentials are unchanged."
             : "Spending is assumed constant over time — if you'd naturally cut back in later retirement, the true figure is more favourable.";
+          const cushionPhrase = "even if investment returns came in 1 point lower than assumed";
+          const cushionNote = "The cushion here is a 1-point shortfall in investment returns across all assets, so the answer has room to spare rather than only just working. Longevity is covered separately by the \u201Clive to 100\u201D card below.";
+          const yearsPhrase = (d) => d < 0 ? `about ${Math.abs(d)} year${Math.abs(d) === 1 ? "" : "s"} sooner than planned` : d > 0 ? `about ${d} year${d === 1 ? "" : "s"} later than planned` : "at the planned age";
           const cards = [];
 
           if (goal.fundedNow) {
             // SPENDING
             const pctMore = goal.spend != null ? ((goal.spend - 1) * 100).toFixed(1) : null;
-            if (goal.maxSpend != null && goal.curSpend > 0)
-              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life${pctMore != null && parseFloat(pctMore) < 400 ? ` — roughly ${pctMore}% more than the current ${m(goal.curSpend)}` : ` — well above the current ${m(goal.curSpend)}`}.`, note: `Single-lever answer: all other inputs (retirement age, growth rates, contributions) are held constant. ${spendBasisNote}` });
+            if (goal.maxSpendSafe != null && goal.curSpend > 0) {
+              const safe = goal.maxSpendSafe, edge = goal.maxSpend, curS = goal.curSpend, pm = (safe / curS - 1) * 100;
+              if (safe >= curS)
+                cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(safe)} a year in today's money${pm < 1 ? ` — about the same as your current ${m(curS)}` : pm < 400 ? ` — roughly ${pm.toFixed(0)}% more than the current ${m(curS)}` : ` — well above the current ${m(curS)}`}, with the plan still funded for life ${cushionPhrase}.`, note: `Single-lever answer: retirement age, growth rates and contributions are held constant. ${cushionNote} The absolute ceiling, with no cushion at all, is about ${m(edge)} a year. ${spendBasisNote}` });
+              else
+                cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Today's spending of about ${m(curS)} a year funds the plan, but with little safety margin. For a cushion — funded ${cushionPhrase} — spending would sit around ${m(safe)} a year.`, note: `Single-lever answer: retirement age, growth rates and contributions are held constant. ${cushionNote} The plan still funds for life on spending up to about ${m(edge)} a year, but that leaves no room if markets disappoint. ${spendBasisNote}` });
+            } else if (goal.maxSpend != null && goal.curSpend > 0)
+              cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Up to about ${m(goal.maxSpend)} a year in today's money and the plan still lasts for life — though with no safety cushion; even a 1-point shortfall in returns would put it under pressure.`, note: `Single-lever answer: all other inputs held constant. No spending level holds the full cushion here — the constraint is the asset and income base, not spending. ${spendBasisNote}` });
             else
               cards.push({ Icon: Receipt, verdict: "head", q: "How much can I spend each year?", text: `Spending could rise by about ${pctMore}% and the plan would still last for life.`, note: "All other inputs held constant." });
 
             // RETIREMENT
-            if (goal.retire != null && goal.retire < 0)
-              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAge}${couple ? " each" : ""} — about ${Math.abs(goal.retire)} year${Math.abs(goal.retire) === 1 ? "" : "s"} sooner than planned — and still funded for life${goal.retireMargin != null && goal.retireMargin > 0 ? `, leaving about ${m(goal.retireMargin)} at plan end` : ""}.`, note: `${smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending stays at today's level through retirement (no lifestyle reduction)."} Income sources (salary ending, pensions starting) follow your plan exactly as entered. The estate figure is the margin of safety behind this answer — it's what differentiates an answer that's comfortably affordable from one that only just works.` });
+            const retSpendBasis = smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending stays at today's level through retirement (no lifestyle reduction).";
+            const edgeAge = goal.earliestRetAge != null ? `age ${goal.earliestRetAge}` : "the planned age";
+            if (goal.retireSafe != null && goal.retireSafe < 0)
+              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `As early as age ${goal.earliestRetAgeSafe}${couple ? " each" : ""} — ${yearsPhrase(goal.retireSafe)} — with the plan still funded for life ${cushionPhrase}.`, note: `${cushionNote} The earliest age the plan funds with no cushion at all is ${edgeAge}${goal.retire != null ? ` (${yearsPhrase(goal.retire)})` : ""}. ${retSpendBasis} Income sources follow your plan exactly as entered.` });
+            else if (goal.retireSafe === 0)
+              cards.push({ Icon: User, verdict: "head", q: "When can I afford to retire?", text: `Retiring at the planned age (${goal.earliestRetAgeSafe})${couple ? " each" : ""} holds up with a safety margin — funded for life ${cushionPhrase}.${goal.retire != null && goal.retire < 0 ? ` You could go as early as ${edgeAge} if you accept no cushion.` : ""}`, note: `${cushionNote} ${retSpendBasis} Income sources follow your plan exactly as entered.` });
+            else if (goal.retireSafe != null)
+              cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age funds the plan, but with little margin. For a cushion — funded ${cushionPhrase} — retiring around age ${goal.earliestRetAgeSafe} (${yearsPhrase(goal.retireSafe)}) gives room to spare.`, note: `${cushionNote} The plan still funds at break-even from ${edgeAge}, but with no margin if markets disappoint. ${retSpendBasis}` });
             else
-              cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `The planned age (${ret1}) is about the earliest that works given current spending and assets.`, note: "Assumes spending stays unchanged in retirement. If retirement costs are lower, an earlier date may be feasible." });
+              cards.push({ Icon: User, verdict: "info", q: "When can I afford to retire?", text: `Even retiring substantially later doesn't secure a full safety cushion within the dates tested — the constraint is the asset and income base, not the retirement date.`, note: `${cushionNote} The plan may still fund at break-even from the planned age; this card is about having room to spare.` });
 
             // RETURNS
             if (goal.growthCapped)
@@ -2844,18 +2899,44 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             }
 
             // MONTHLY
-            if (goal.maxMonthly != null)
-              cards.push({ Icon: Receipt, verdict: "head", q: "Could I take on a new monthly cost?", text: goal.maxMonthly >= 50000 ? "A substantial new monthly commitment would still leave the plan funded for life." : `Up to about ${m(goal.maxMonthly)} a month extra and the plan would still last for life.`, note: "Models a new expense starting today and running to the end of the plan, rising with inflation. It does not account for the cost stopping at a future date (e.g. when school fees end or a mortgage clears). A permanent test — not a temporary one." });
+            if (goal.maxMonthly != null) {
+              const safeMo = goal.maxMonthlySafe;
+              if (safeMo != null && safeMo >= 50)
+                cards.push({ Icon: Receipt, verdict: "head", q: "Could I take on a new monthly cost?", text: safeMo >= 50000 ? `A substantial new monthly commitment would still leave the plan funded for life ${cushionPhrase}.` : `Up to about ${m(safeMo)} a month extra, with the plan still funded for life ${cushionPhrase}.`, note: `Models a permanent new expense starting today and rising with inflation — it doesn't account for the cost stopping later (e.g. school fees ending). ${cushionNote} The absolute ceiling, with no cushion, is about ${m(goal.maxMonthly)} a month.` });
+              else
+                cards.push({ Icon: Receipt, verdict: "info", q: "Could I take on a new monthly cost?", text: `There's little safe room for a new ongoing cost right now — the plan funds at break-even, but a permanent new commitment would use up its cushion against poor markets.`, note: `Models a permanent new expense rising with inflation. ${cushionNote} The plan could absorb up to about ${m(goal.maxMonthly)} a month before it would run short on current assumptions, but with no margin.` });
+            }
+
+            if (goal.stopSaving) {
+              const ss = goal.stopSaving;
+              const ssNote = `\u201CSaving\u201D here means the regular contributions you pay into your pensions and investments — about ${m(ss.total)} a year in total. The card switches them all off from today; your spending, retirement age and income are left exactly as planned. Any spare income in a year still follows your surplus setting in Assumptions.`;
+              if (ss.safe)
+                cards.push({ Icon: PiggyBank, verdict: "head", q: "Could I stop saving now?", text: `Yes — you could stop the regular contributions you're paying in (about ${m(ss.total)} a year) and the plan would still be funded for life with room to spare, ${cushionPhrase}.`, note: ssNote });
+              else if (ss.funded)
+                cards.push({ Icon: PiggyBank, verdict: "info", q: "Could I stop saving now?", text: `You could stop the regular contributions you're paying in (about ${m(ss.total)} a year) and the plan would still fund for life — but with little safety margin; a 1-point shortfall in returns would put it under pressure. Carrying on a while longer keeps that cushion.`, note: ssNote });
+              else
+                cards.push({ Icon: PiggyBank, verdict: "info", q: "Could I stop saving now?", text: `Not yet — the contributions you're paying in (about ${m(ss.total)} a year) are still doing real work. The plan funds for life with them running as planned, but stopping them today would leave it short.`, note: ssNote });
+            }
 
           } else {
             // NOT FUNDED — what would fix it
-            if (goal.spend != null)
-              cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${((1 - goal.spend) * 100).toFixed(1)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fully fund the plan.`, note: "All other inputs held constant. Reducing discretionary spending while keeping essentials is more realistic — the model applies the cut uniformly." });
+            if (goal.spend != null) {
+              const cutEdge = (1 - goal.spend) * 100;
+              if (goal.spendSafe != null && goal.maxSpendSafe != null && goal.spendSafe < 1)
+                cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${cutEdge.toFixed(0)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fund the plan — or about ${((1 - goal.spendSafe) * 100).toFixed(0)}% (to about ${m(goal.maxSpendSafe)}) to fund it with a safety cushion ${cushionPhrase}.`, note: `All other inputs held constant; the cut is applied uniformly across recurring spending. ${cushionNote}` });
+              else
+                cards.push({ Icon: Receipt, verdict: "need", q: "How much would I need to cut spending?", text: `Spending needs to drop by about ${cutEdge.toFixed(0)}%${goal.maxSpend != null ? ` (to about ${m(goal.maxSpend)} a year)` : ""} to fully fund the plan.`, note: "All other inputs held constant; the cut is applied uniformly across recurring spending. A cushion against poor markets would need a deeper cut than the asset base comfortably allows." });
+            }
             else
               cards.push({ Icon: Receipt, verdict: "no", q: "How much would I need to cut spending?", text: "The plan can't be funded even on a much-reduced budget — the income and asset base is the constraint.", note: "This points to an income or asset shortfall, not a spending problem." });
 
-            if (goal.retire != null)
-              cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `Between ${goal.retire} and ${goal.retire + 1} more year${goal.retire + 1 === 1 ? "" : "s"}${couple ? " each" : ` (retire somewhere between ${ret1 + goal.retire} and ${ret1 + goal.retire + 1})`} fully funds the plan.`, note: `${smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending unchanged through retirement."} Working longer adds income and delays drawdown — both help. If only one partner works, the gain is proportionally smaller. The solver works in whole years — the true answer sits within this range.` });
+            if (goal.retire != null) {
+              const wlBasis = `${smile ? "Spending follows your retirement-smile pattern (lifestyle eases in later life), which the solver applies." : "Assumes spending unchanged through retirement."} Working longer adds income and delays drawdown. If only one partner works, the gain is proportionally smaller. The solver works in whole years.`;
+              if (goal.retireSafe != null && goal.retireSafe > goal.retire)
+                cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `About ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} funds the plan — or about ${goal.retireSafe} more year${goal.retireSafe === 1 ? "" : "s"} to fund it with a safety cushion ${cushionPhrase}.`, note: `${wlBasis} ${cushionNote}` });
+              else
+                cards.push({ Icon: User, verdict: "need", q: "How much longer would I need to work?", text: `About ${goal.retire} more year${goal.retire === 1 ? "" : "s"}${couple ? " each" : ` (retire at ${ret1 + goal.retire})`} fully funds the plan.`, note: wlBasis });
+            }
             else
               cards.push({ Icon: User, verdict: "no", q: "Would working longer fix it?", text: "Working longer alone doesn't close the gap within 25 years — it needs combining with lower spending or higher returns.", note: "The structural gap is too large for additional working years alone to resolve." });
 
@@ -3160,6 +3241,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 ? ` — ${stressImpact.label}`
                 : "";
           const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName}{scenarioSuffix} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
+          const RepHead = () => <div className="rep-runhead" aria-hidden="true"><span className="rep-rh-brand"><svg viewBox="0 0 48 54" width="14" height="16" fill="none"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="7" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.6" fill="#C8A951" /></svg>Meridian</span><span className="rep-rh-doc">{clientName} · Cashflow plan</span></div>;
           const assetMix = (() => { const by = {}; assets.forEach((a) => { by[a.type] = (by[a.type] || 0) + (Number(a.value) || 0); }); return Object.entries(by).filter(([, v]) => v > 0).map(([type, value]) => ({ type, value, name: TYPE_LABEL[type] })); })();
           const y0 = rows[0] || {}; const inc0 = y0.income || 0; const exp0 = y0.expenditure || 0;
 
@@ -3251,7 +3333,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <button className="wi-reset" onClick={() => setReportOpen(false)}>Close</button>
                 </div>
               </div>
-              <div className="rep-runhead" aria-hidden="true"><span className="rep-rh-brand"><svg viewBox="0 0 48 54" width="15" height="17" fill="none"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="7" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.6" fill="#C8A951" /></svg>Meridian</span><span className="rep-rh-doc">{clientName} · Cashflow plan</span></div>
               <div className="report-sheet">
 
                 {/* Cover + verdict */}
@@ -3281,6 +3362,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Executive summary */}
                 {on("exec") && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Executive summary</h2>
                     <p className="rep-p rep-lede">{verdictText}</p>
                     <div className="rep-exec-grid">
@@ -3301,6 +3383,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Financial snapshot */}
                 {on("snapshot") && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Financial snapshot — today</h2>
                     <div className="rep-snap">
                       <div className="rep-snap-pie">
@@ -3329,6 +3412,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Year-by-year summary */}
                 {on("yeartable") && yearTable.length > 0 && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Year-by-year summary</h2>
                     <p className="rep-p">The plan at key ages — retirement, and at five-year intervals. {basis} Income includes planned drawdown; surplus is income less spending in that year.</p>
                     <table className="rep-table rep-yt">
@@ -3361,6 +3445,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Charts */}
                 {on("charts") && (<>
                 <section className="report-page">
+                  <RepHead />
                   <h2 className="rep-h2">Projected net worth</h2>
                   <p className="rep-p">How total assets, less any debts, are projected to evolve over the life of the plan. Figures in {basis.toLowerCase()}.{stressActive ? " A stress scenario is active — see the stress test page." : ""}</p>
                   <div className="rep-chart">
@@ -3389,6 +3474,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <RepFoot />
                 </section>
                 <section className="report-page">
+                  <RepHead />
                   <h2 className="rep-h2">Money in versus money out</h2>
                   <p className="rep-p">Annual income by source against total spending (the line). Where spending exceeds income, the shortfall is drawn from savings.</p>
                   <div className="rep-chart">
@@ -3417,6 +3503,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Cash gap */}
                 {on("cashgap") && reportCashGap && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Cash gap analysis</h2>
                     {reportCashGap.none ? (
                       <p className="rep-p rep-lede">Income covers spending in every year of the plan. Savings and investments are never drawn upon under the current assumptions.</p>
@@ -3464,6 +3551,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   const endGap = Math.max(0, (endRow.netWorth ?? 0) - (endRow.stressed ?? 0));
                   return (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Stress test</h2>
                     <p className="rep-p rep-lede">Scenario applied: <b>{stressImpact.label}</b></p>
                     {(() => {
@@ -3520,6 +3608,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     // No result at all yet — still computing
                     return (
                       <section className="report-page">
+                  <RepHead />
                         <h2 className="rep-h2">Plan confidence</h2>
                         <p className="rep-p rep-lede">Running simulation… {Math.round(mcRun.progress * 100)}%</p>
                         <RepFoot />
@@ -3533,6 +3622,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   const p = Math.round(result.prob);
                   return (
                     <section className="report-page">
+                  <RepHead />
                       <h2 className="rep-h2">Plan confidence</h2>
                       {!fresh && <p className="rep-p rep-sub" style={{color:"var(--amber)"}}>Note: this result was computed on a previous version of the plan. A fresh simulation is running in the background.</p>}
                       <p className="rep-p rep-lede">Across <b>{MC_RUNS}</b> simulated futures with market returns varied around the plan's assumptions ({lvl} volatility), <b>{p}%</b> keep the plan funded for life.</p>
@@ -3565,6 +3655,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Protection snapshot */}
                 {on("protection") && (protSnap || protGap) && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Protection</h2>
                     {protection.length === 0
                       ? <p className="rep-p rep-lede">Policies in force: <b>none</b> — no cover is currently recorded. The benchmark below measures the full gap on that basis.</p>
@@ -3611,6 +3702,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* What-if answers */}
                 {on("whatif") && goal && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">"What if I asked…"</h2>
                     <p className="rep-p">Single-question answers computed from this plan. Each changes one input only, holding everything else constant — read the note beneath the table.</p>
                     <table className="rep-table">
@@ -3648,6 +3740,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Detailed inputs */}
                 {on("inputs") && (<>
                 <section className="report-page">
+                  <RepHead />
                   <h2 className="rep-h2">Assets</h2>
                   <table className="rep-table">
                     <thead><tr><th>Asset</th><th>Owner</th><th>Type</th><th className="r">Current value</th><th className="r">Growth</th><th className="r">At retirement</th></tr></thead>
@@ -3669,6 +3762,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <RepFoot />
                 </section>
                 <section className="report-page">
+                  <RepHead />
                   <h2 className="rep-h2">Expenditure</h2>
                   <table className="rep-table">
                     <thead><tr><th>Item</th><th>Owner</th><th className="r">Amount</th><th>Frequency</th><th>From</th><th>To</th><th>Priority</th></tr></thead>
@@ -3692,6 +3786,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Assumptions */}
                 {on("assumptions") && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Key assumptions</h2>
                     <table className="rep-table">
                       <tbody>
@@ -3713,6 +3808,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Tax overview */}
                 {on("taxov") && ((assumptions.tax && assumptions.tax.enabled) || est.enabled) && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Tax overview</h2>
                     {assumptions.tax && assumptions.tax.enabled && (<>
                       <p className="rep-p rep-lede">Illustrative tax applied to this plan, based on the residence timeline below. Income is treated as net unless marked gross/taxable; tax applies to gross income, pension withdrawals, investment drawdown and offshore-bond gains in periods where rates are set.</p>
@@ -3751,6 +3847,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {/* Commentary */}
                 {on("commentary") && commentaryText && (
                   <section className="report-page">
+                  <RepHead />
                     <h2 className="rep-h2">Commentary</h2>
                     {commentaryText.split(/\n\n+/).map((para, i) => <p className="rep-p" key={i}>{para}</p>)}
                     <RepFoot />
@@ -3759,6 +3856,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
                 {/* Disclaimers — always */}
                 <section className="report-page report-last">
+                  <RepHead />
                   <h2 className="rep-h2">Important information</h2>
                   <p className="rep-disc">This report is an illustration based on the assumptions and figures shown above, which have been provided or agreed with you. It is not a guarantee of future outcomes. Investment growth is assumed and actual returns will vary; values can fall as well as rise, and past performance is not indicative of future results.</p>
                   <p className="rep-disc">Any tax figures shown are illustrative only and do not constitute tax advice. Tax treatment depends on individual circumstances and on the rules of each relevant jurisdiction, which may change. Advice should be obtained from a qualified tax specialist before acting.</p>
@@ -4366,10 +4464,10 @@ const CSS = `
   .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
   .report-page.report-last { page-break-after: auto; }
   .rep-table, .rep-kpi, .rep-chart, .rep-verdict { break-inside: avoid; }
-  .rep-runhead { display: flex; align-items: center; justify-content: space-between; position: fixed; top: 0; left: 0; right: 0; padding: 6px 15px 5px; background: #fff; border-bottom: 1px solid #e6e9ee; }
+  .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
   .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
   .rep-rh-doc { font-size: 10px; color: #7a8493; }
-  @page { size: A4; margin: 20mm 16mm 16mm; }
+  @page { size: A4; margin: 16mm; }
 }
 .cash-head{margin-top:12px;border-top:1px solid var(--border);padding-top:11px;}
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
