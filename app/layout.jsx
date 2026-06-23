@@ -2,7 +2,7 @@ import "./globals.css";
 import { AuthProvider } from "../lib/AuthProvider";
 
 export const metadata = {
-  title: "Meridian — cashflow planning",
+  title: "Meridian",
   description: "Cashflow forecasting for international and expat financial advisers.",
 };
 
