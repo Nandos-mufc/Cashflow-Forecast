@@ -905,6 +905,28 @@ function NumberInput({ value, onCommit, className = "", step = 1, min, commitDel
 const Money = ({ value, onChange, symbol }) => (
   <div className="money"><span className="money-sym">{symbol}</span><NumberInput value={value} step={1000} min={0} className="money-in" onCommit={onChange} /></div>
 );
+// Multiline note input. Keeps keystrokes in local state and only lifts to the (large) report
+// config on pause or blur, so typing never re-renders the whole app — same pattern as NumberInput.
+function NoteInput({ value, onCommit, placeholder, className = "", commitDelay = 400 }) {
+  const [txt, setTxt] = useState(value || "");
+  const focused = useRef(false);
+  const timer = useRef(null);
+  useEffect(() => { if (!focused.current && txt !== (value || "")) setTxt(value || ""); }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return (
+    <textarea
+      rows={2} className={className} value={txt} placeholder={placeholder}
+      onFocus={() => { focused.current = true; }}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setTxt(raw);
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => { timer.current = null; onCommit(raw); }, commitDelay);
+      }}
+      onBlur={() => { focused.current = false; if (timer.current) { clearTimeout(timer.current); timer.current = null; } onCommit(txt); }}
+    />
+  );
+}
 // Range slider with an instantly-responsive thumb (local state) whose upward commit is
 // coalesced to one update per frame — keeps live-drag smooth even when the commit drives
 // an expensive recompute (e.g. the survivor solver).
@@ -3470,7 +3492,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         {pages.map(([key, label]) => (
                           <div className="rcfg-note-field" key={key}>
                             <label>{label}</label>
-                            <textarea rows={2} value={(reportCfg.notes || {})[key] || ""} placeholder="Optional — leave blank if nothing to add" onChange={(e) => upNote(key, e.target.value)} />
+                            <NoteInput value={(reportCfg.notes || {})[key] || ""} placeholder="Optional — leave blank if nothing to add" onCommit={(v) => upNote(key, v)} />
                           </div>
                         ))}
                       </div>
@@ -4707,7 +4729,7 @@ const CSS = `
   .report-overlay { position: absolute; inset: 0; background: #fff; overflow: visible; }
   .report-no-print { display: none !important; }
   .report-sheet { margin: 0; border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
-  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; min-height: 263mm; box-sizing: border-box; }
+  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
   .report-page.report-last { page-break-after: auto; }
   .rep-table, .rep-kpi, .rep-chart, .rep-verdict, .rep-notes { break-inside: avoid; }
   .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
