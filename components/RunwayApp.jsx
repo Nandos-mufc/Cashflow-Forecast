@@ -4607,7 +4607,7 @@ const CSS = `
 .rep-foot{margin-top:auto;padding-top:14px;font-size:9.5px;color:#9aa3ae;border-top:1px solid #eceff3;text-align:center;}
 .rep-notes{margin-top:20px;border:1px solid #e6e9ee;border-left:3px solid #0CA5A5;border-radius:10px;background:#f5fafa;padding:13px 16px;min-height:128px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 .rep-notes.empty{background:#f7f9fb;border-left-color:#ccd6da;}
-.rep-notes-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#0a8a8a;margin-bottom:6px;}
+.rep-notes-label{font-size:11.5px;font-weight:700;letter-spacing:.01em;color:#0a8a8a;margin-bottom:6px;}
 .rep-notes.empty .rep-notes-label{color:#8a96a2;}
 .rep-notes-text{font-size:12.5px;color:#3a424d;line-height:1.55;margin:0;white-space:pre-wrap;}
 .report-page{display:flex;flex-direction:column;}
@@ -4707,7 +4707,7 @@ const CSS = `
   .report-overlay { position: absolute; inset: 0; background: #fff; overflow: visible; }
   .report-no-print { display: none !important; }
   .report-sheet { margin: 0; border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
-  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; min-height: 263mm; box-sizing: border-box; }
   .report-page.report-last { page-break-after: auto; }
   .rep-table, .rep-kpi, .rep-chart, .rep-verdict, .rep-notes { break-inside: avoid; }
   .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
