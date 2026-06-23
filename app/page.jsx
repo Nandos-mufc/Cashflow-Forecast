@@ -6,6 +6,49 @@ import RouteGuard from "../components/RouteGuard";
 import { useAuth } from "../lib/AuthProvider";
 import { listClients, createClient, renameClient, deleteClient } from "../lib/store";
 
+// Health verdict + label, derived from the plan summary the engine wrote. Mirrors RunwayApp's
+// kpis.tone so the dashboard and the in-plan banner always agree. Null when no summary yet.
+function healthMeta(s) {
+  if (!s || !s.tone) return null;
+  if (s.tone === "green") return { key: "green", label: "On track" };
+  if (s.tone === "amber") return { key: "amber", label: s.depletionAge ? `Lasts to ${s.depletionAge}` : "Caution" };
+  return { key: "red", label: s.depletionAge ? `Runs out at ${s.depletionAge}` : "At risk" };
+}
+
+function compact(n) {
+  const a = Math.abs(n || 0);
+  if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "m";
+  if (a >= 1e3) return Math.round(n / 1e3) + "k";
+  return String(Math.round(n || 0));
+}
+
+function Spark({ series, tone }) {
+  if (!Array.isArray(series) || series.length < 2) return null;
+  const w = 120, h = 30;
+  const min = Math.min(...series), max = Math.max(...series);
+  const span = (max - min) || 1;
+  const pts = series
+    .map((v, i) => `${((i / (series.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`)
+    .join(" ");
+  const col = tone === "green" ? "var(--h-green)" : tone === "amber" ? "var(--h-amber)" : "var(--h-red)";
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display: "block", width: "100%" }}>
+      <polyline points={pts} fill="none" stroke={col} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function HealthPill({ summary }) {
+  const hm = healthMeta(summary);
+  if (!hm) return null;
+  return (
+    <span className={`dz-hpill ${hm.key}`}>
+      <span className="dot" />
+      {hm.label}
+    </span>
+  );
+}
+
 function Dashboard() {
   const router = useRouter();
   const { user, signOut } = useAuth();
@@ -15,7 +58,7 @@ function Dashboard() {
 
   // View / filter state
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState("updated"); // "updated" | "name"
+  const [sort, setSort] = useState("updated"); // "updated" | "name" | "health"
   const [view, setView] = useState("grid");     // "grid" | "list"
   const [menuId, setMenuId] = useState(null);    // card whose ⋯ menu is open
 
@@ -109,13 +152,19 @@ function Dashboard() {
   const fmtDate = (s) => new Date(s).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 
   const q = query.trim().toLowerCase();
+  const toneRank = { red: 0, amber: 1, green: 2 };
   const visible = clients
     .filter((c) => !q || c.display_name.toLowerCase().includes(q))
-    .sort((a, b) =>
-      sort === "name"
-        ? a.display_name.localeCompare(b.display_name)
-        : new Date(b.updated_at) - new Date(a.updated_at)
-    );
+    .sort((a, b) => {
+      if (sort === "name") return a.display_name.localeCompare(b.display_name);
+      if (sort === "health") {
+        const ra = toneRank[a.summary?.tone] ?? 3;
+        const rb = toneRank[b.summary?.tone] ?? 3;
+        if (ra !== rb) return ra - rb;
+        return new Date(b.updated_at) - new Date(a.updated_at);
+      }
+      return new Date(b.updated_at) - new Date(a.updated_at);
+    });
 
   // Self-contained dialog styling so this doesn't depend on global CSS being present.
   const overlay = { position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 };
@@ -138,7 +187,8 @@ function Dashboard() {
   return (
     <div className="dz-shell">
       <style>{`
-        .dz-shell{max-width:1180px;margin:0 auto;padding:26px 24px 70px;}
+        .dz-shell{max-width:1180px;margin:0 auto;padding:26px 24px 70px;--h-green:#2E9E5B;--h-amber:#D98E1E;--h-red:#D6453E;}
+        [data-theme="dark"] .dz-shell{--h-green:#3FB873;--h-amber:#E6A23C;--h-red:#E25A54;}
         .dz-top{display:flex;align-items:center;justify-content:space-between;padding-bottom:22px;margin-bottom:24px;border-bottom:1px solid var(--border);}
         .dz-brand{display:flex;align-items:center;gap:12px;}
         .dz-mark{width:38px;height:38px;border-radius:10px;background:#0F2233;display:inline-flex;align-items:center;justify-content:center;flex:none;}
@@ -165,6 +215,9 @@ function Dashboard() {
         .dz-accent{position:absolute;left:0;top:16px;bottom:16px;width:3px;border-radius:0 3px 3px 0;background:var(--accent);}
         .dz-card h3{margin:0;font-size:16px;font-weight:700;letter-spacing:-0.01em;color:var(--ink);padding-right:26px;line-height:1.35;word-break:break-word;}
         .dz-meta{font-size:12px;color:var(--low);margin-top:8px;font-variant-numeric:tabular-nums;}
+        .dz-sparkwrap{margin:14px 0 12px;}
+        .dz-cardfoot{display:flex;align-items:center;gap:8px;}
+        .dz-endval{font-size:12px;color:var(--low);font-variant-numeric:tabular-nums;margin-left:auto;}
         .dz-kebab{position:absolute;top:14px;right:12px;width:28px;height:28px;border:none;background:transparent;color:var(--low);border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;opacity:0;transition:.12s;}
         .dz-card:hover .dz-kebab{opacity:1;}
         .dz-kebab:hover{background:var(--bg);color:var(--ink);}
@@ -173,14 +226,21 @@ function Dashboard() {
         .dz-menu button:hover{background:var(--bg);}
         .dz-menu button.del{color:var(--red);}
 
+        .dz-hpill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mid);}
+        .dz-hpill .dot{width:8px;height:8px;border-radius:50%;flex:none;}
+        .dz-hpill.green .dot{background:var(--h-green);}
+        .dz-hpill.amber .dot{background:var(--h-amber);}
+        .dz-hpill.red .dot{background:var(--h-red);}
+
         .dz-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;}
         .dz-table th{text-align:left;font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--low);padding:13px 16px;cursor:pointer;white-space:nowrap;user-select:none;}
         .dz-table th:hover{color:var(--accent);}
-        .dz-table td{padding:14px 16px;font-size:14px;border-top:1px solid var(--border);color:var(--ink);}
+        .dz-table td{padding:14px 16px;font-size:14px;border-top:1px solid var(--border);color:var(--ink);vertical-align:middle;}
         .dz-table tr.row{cursor:pointer;}
         .dz-table tr.row:hover td{background:var(--bg);}
         .dz-rowname{font-weight:600;}
         .dz-rowmeta{color:var(--low);font-variant-numeric:tabular-nums;white-space:nowrap;}
+        .dz-muted{color:var(--low);}
         .dz-iconbtn{width:30px;height:30px;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
         .dz-iconbtn:hover{color:var(--ink);border-color:var(--accent);}
         .dz-iconbtn.del:hover{color:var(--red);border-color:var(--red);}
@@ -229,6 +289,7 @@ function Dashboard() {
             <select className="dz-select" value={sort} onChange={(e) => setSort(e.target.value)}>
               <option value="updated">Last updated</option>
               <option value="name">Name A–Z</option>
+              <option value="health">Health</option>
             </select>
             <span className="dz-count">{visible.length} {visible.length === 1 ? "client" : "clients"}</span>
             <span className="dz-spacer" />
@@ -248,6 +309,7 @@ function Dashboard() {
             <div className="dz-grid">
               {visible.map((c) => {
                 const editing = editingId === c.id;
+                const s = c.summary;
                 return (
                   <div key={c.id} className="dz-card" onClick={() => { if (!editing) router.push(`/plan/${c.id}`); }}>
                     <span className="dz-accent" />
@@ -268,6 +330,15 @@ function Dashboard() {
                       <h3>{c.display_name}</h3>
                     )}
                     <div className="dz-meta">Updated {fmtDate(c.updated_at)}</div>
+                    {s && Array.isArray(s.series) && s.series.length > 1 && (
+                      <div className="dz-sparkwrap"><Spark series={s.series} tone={s.tone} /></div>
+                    )}
+                    {s && (
+                      <div className="dz-cardfoot">
+                        <HealthPill summary={s} />
+                        {typeof s.endVal === "number" && <span className="dz-endval">{s.sym || ""}{compact(s.endVal)}</span>}
+                      </div>
+                    )}
                     <button className="dz-kebab" onClick={(e) => { e.stopPropagation(); setMenuId(menuId === c.id ? null : c.id); }} aria-label="More actions">
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="19" r="1.6" /></svg>
                     </button>
@@ -281,13 +352,16 @@ function Dashboard() {
               <thead>
                 <tr>
                   <th onClick={() => setSort("name")}>Client</th>
-                  <th onClick={() => setSort("updated")} style={{ width: 160 }}>Last updated</th>
+                  <th onClick={() => setSort("health")} style={{ width: 150 }}>Health</th>
+                  <th style={{ width: 130 }}>Trend</th>
+                  <th onClick={() => setSort("updated")} style={{ width: 150 }}>Last updated</th>
                   <th style={{ width: 90, textAlign: "right" }}></th>
                 </tr>
               </thead>
               <tbody>
                 {visible.map((c) => {
                   const editing = editingId === c.id;
+                  const s = c.summary;
                   return (
                     <tr key={c.id} className="row" onClick={() => { if (!editing) router.push(`/plan/${c.id}`); }}>
                       <td>
@@ -308,6 +382,8 @@ function Dashboard() {
                           <span className="dz-rowname">{c.display_name}</span>
                         )}
                       </td>
+                      <td>{s ? <HealthPill summary={s} /> : <span className="dz-muted">—</span>}</td>
+                      <td style={{ width: 130 }}>{s && Array.isArray(s.series) && s.series.length > 1 ? <div style={{ width: 110 }}><Spark series={s.series} tone={s.tone} /></div> : <span className="dz-muted">—</span>}</td>
                       <td className="dz-rowmeta">{fmtDate(c.updated_at)}</td>
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                         <button className="dz-iconbtn" onClick={(e) => startRename(c, e)} aria-label="Rename" title="Rename" style={{ marginRight: 6 }}>
