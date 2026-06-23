@@ -45,9 +45,9 @@ export default function LoginPage() {
   return (
     <div className="ml-wrap">
       <style>{`
-        .ml-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--bg);}
-        .ml-card{width:100%;max-width:860px;display:flex;background:var(--card);border:1px solid var(--border);border-radius:20px;overflow:hidden;box-shadow:0 24px 60px rgba(16,42,67,0.10);}
-        .ml-brand{flex:0 0 44%;background:#102A43;padding:38px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;}
+        .ml-wrap{min-height:100vh;display:flex;background:var(--bg);}
+        .ml-card{flex:1;display:flex;background:var(--card);overflow:hidden;}
+        .ml-brand{flex:0 0 46%;max-width:560px;background:#102A43;padding:56px 52px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;}
         .ml-brand-curve{position:absolute;left:0;bottom:0;width:100%;height:46%;opacity:.13;}
         .ml-logo{display:flex;align-items:center;gap:12px;position:relative;}
         .ml-logo-tile{width:40px;height:40px;border-radius:10px;background:#0F2233;display:inline-flex;align-items:center;justify-content:center;}
@@ -74,7 +74,7 @@ export default function LoginPage() {
         .ml-info{color:var(--accent);font-size:12.5px;margin:0 0 14px;}
         .ml-switch{text-align:center;font-size:13.5px;color:var(--mid);margin-top:22px;}
         .ml-switch button{border:none;background:none;color:var(--accent);font-weight:600;cursor:pointer;font-family:inherit;font-size:13.5px;}
-        @media(max-width:640px){.ml-brand{display:none;}.ml-card{max-width:380px;}.ml-form{padding:34px 28px;}}
+        @media(max-width:640px){.ml-brand{display:none;}.ml-form{padding:34px 28px;}}
       `}</style>
 
       <div className="ml-card">
