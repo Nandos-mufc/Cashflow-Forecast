@@ -1144,7 +1144,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   useEffect(() => {
     if (!onChange) return;
     const id = setTimeout(() => {
-      onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult });
+      onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult, summary: planSummary });
     }, 600);
     return () => clearTimeout(id);
   }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1481,6 +1481,38 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     }
     return { currentTotal, peak, atRetirement, endVal, endYear, depletionAge, depYear, depName, depRet, tone, s };
   }, [rows, stressRows, assets, liabilities, ectx, baseYear, couple, fn1, fn2, inflDec, showReal]);
+
+  // Compact, BASE-plan summary persisted to the client row (via onChange -> savePlan) so the
+  // dashboard can show a health dot + net-worth sparkline without re-running the projection per
+  // card. Purely derived, never an input. tone/depletionAge come straight from kpis so the
+  // dashboard verdict and the in-plan banner can never disagree; the series is base-only
+  // (reportData) so a left-open what-if/stress overlay can't leak into the saved shape.
+  const planSummary = useMemo(() => {
+    const src = reportData;
+    if (!src || !src.length) return null;
+    const N = 24;
+    const series = [];
+    if (src.length <= N) {
+      for (const r of src) series.push(Math.round(r.netWorth));
+    } else {
+      const step = (src.length - 1) / (N - 1);
+      for (let i = 0; i < N; i++) series.push(Math.round(src[Math.round(i * step)].netWorth));
+    }
+    return {
+      v: 1,
+      tone: kpis.tone,                 // "green" | "amber" | "red" — same source as the banner
+      depletionAge: kpis.depletionAge, // null = funded to the end of the plan
+      depYear: kpis.depYear,
+      startVal: Math.round(kpis.currentTotal || 0),
+      endVal: Math.round(kpis.endVal || 0),
+      endYear: kpis.endYear,
+      series,                          // base net worth, downsampled to N points
+      cur,
+      sym,
+      real: showReal,                  // basis the figures were captured in
+      at: Date.now(),
+    };
+  }, [reportData, kpis, cur, sym, showReal]);
 
   const banner = useMemo(() => {
     // When a stress scenario is active, the banner reflects the stressed outcome, not the base plan.
