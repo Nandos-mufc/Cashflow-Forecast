@@ -119,6 +119,29 @@ const contribDefault = (enabled = false, amount = 0) => ({
 const withdrawalDefault = () => ({ enabled: false, amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, start: { mode: "retirement" }, end: { mode: "end" } });
 const deathDefault = () => ({ mode: "cease", pct: 50 });
 
+// ---- Goals -------------------------------------------------------------------------------------
+// Forward-looking client targets. Four kinds, each answering a question a client actually asks.
+// None re-run the projection: retirement income and legacy read already-computed plan figures,
+// the savings target is closed-form, never-run-out reads the depletion result. Persisted with the
+// plan (not localStorage), so goals travel with the client and never leak between clients.
+const GOAL_KINDS = [
+  { value: "retirementIncome", label: "Retirement income" },
+  { value: "accumulation",     label: "Savings target" },
+  { value: "legacy",           label: "Leave a legacy" },
+  { value: "neverRunOut",      label: "Never run out of money" },
+];
+const GOAL_KIND_LABEL = Object.fromEntries(GOAL_KINDS.map((k) => [k.value, k.label]));
+const goalDefault = (kind = "accumulation") => ({
+  id: uid(),
+  kind,
+  name: GOAL_KIND_LABEL[kind] || "Goal",
+  owner: "joint",
+  income: 60000, swr: 4,                              // retirement income
+  amount: kind === "legacy" ? 1000000 : 250000,       // target capital (accumulation + legacy)
+  years: 15, fromAmount: 0, growth: 5,                // savings target
+  afterTax: true,                                     // legacy
+});
+
 // Tax is OFF by default (international-first). When off, the engine behaves exactly as if this block didn't exist.
 const taxDefault = () => ({
   enabled: false,
@@ -1071,10 +1094,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [liabilities, setLiabilities] = useState(seed.liabilities || []);
   const [protection, setProtection] = useState(seed.protection || []);
   const [adviserNotes, setAdviserNotes] = useState(seed.adviserNotes || "");
+  const [goals, setGoals] = useState(() => seed.goals || []);
+  const addGoal = (kind) => setGoals((gs) => [...gs, goalDefault(kind)]);
+  const upGoal = (id, patch) => setGoals((gs) => gs.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+  const rmGoal = (id) => setGoals((gs) => gs.filter((g) => g.id !== id));
 
   const REPORT_CFG_KEY = "runway_report_cfg";
   const defaultReportCfg = () => ({
-    sections: { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
+    sections: { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, goals: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
     anonymous: false, adviser: "", firm: "",
   });
   // Per-plan report preferences. Priority: the plan's own saved reportCfg → legacy global localStorage
@@ -1093,10 +1120,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   useEffect(() => {
     if (!onChange) return;
     const id = setTimeout(() => {
-      onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, reportCfg, mcResult });
+      onChange({ profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult });
     }, 600);
     return () => clearTimeout(id);
-  }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, reportCfg, mcResult]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches dark/light.
   useEffect(() => {
@@ -1611,54 +1638,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return { per, firstDeath };
   }, [reportOpen, protection, couple, markers.firstDeath, rows, ectx]);
 
-  // ---- Retirement income goal -----------------------------------------------------------------
-  // "I want £X/yr in retirement" → capital needed at a sustainable withdrawal rate, the gap vs the
-  // plan's projected investable capital at retirement, and the monthly contribution that closes it.
-  const RET_GOAL_KEY = "runway_ret_goal";
-  const [retGoal, setRetGoal] = useState(() => {
-    if (typeof window === "undefined") return { enabled: false, income: 60000, swr: 4 };
-    try { return { enabled: false, income: 60000, swr: 4, ...(JSON.parse(localStorage.getItem(RET_GOAL_KEY) || "{}") || {}) }; } catch { return { enabled: false, income: 60000, swr: 4 }; }
-  });
-  const upRetGoal = (patch) => setRetGoal((g) => { const n = { ...g, ...patch }; try { localStorage.setItem(RET_GOAL_KEY, JSON.stringify(n)); } catch {} return n; });
-  const retGoalCalc = useMemo(() => {
-    if (!retGoal.enabled) return null;
-    const target = Number(retGoal.income) || 0;
-    const swr = Math.min(20, Math.max(0.5, Number(retGoal.swr) || 4)) / 100;
-    if (target <= 0) return null;
-    const requiredCapital = target / swr;
-    // Plan's projected INVESTABLE capital at the first client's retirement, excludes property.
-    // Deflated to today's money so it compares like-for-like with the target the client states
-    // in today's terms (target ÷ SWR is a today's-money figure).
-    const retYear = baseYear + Math.max(0, ectx.retC1 - ectx.age0c1);
-    const retRow = rows.find((r) => r.c1Age === ectx.retC1) || rows.find((r) => r.year >= retYear);
-    const yearsToRet = Math.max(0, ectx.retC1 - ectx.age0c1);
-    const fAtRet = Math.pow(1 + inflDec, yearsToRet);
-    const projInvestable = retRow ? Math.max(0, (retRow.total || 0) - (retRow.property || 0)) / fAtRet : 0;
-    const projIncome = projInvestable * swr;
-    const capitalGap = requiredCapital - projInvestable;
-    const incomeGap = target - projIncome;
-    const invAssets = assets.filter((a) => a.type === "investment" || a.type === "pension");
-    const blended = invAssets.length ? invAssets.reduce((s, a) => s + (Number(a.growthRate) || 0), 0) / invAssets.length : (Number(assumptions.inflation) || 0) + 3;
-    const realRate = Math.max(0, (blended - (Number(assumptions.inflation) || 0)) / 100); // real terms (figures are today's money)
-    // Indicative longevity: drawing the target income from the projected pot, growing at the plan's blended real rate.
-    // Pure annuity-style depletion — a sanity figure, not the full engine (which also has other income).
-    let sustainable = false, yearsLast = null, depleteAge = null;
-    if (projInvestable > 0 && target > 0) {
-      if (target <= realRate * projInvestable + 1) sustainable = true;
-      else if (realRate <= 0) yearsLast = Math.floor(projInvestable / target);
-      else yearsLast = Math.floor(-Math.log(1 - (realRate * projInvestable) / target) / Math.log(1 + realRate));
-      if (yearsLast != null) depleteAge = ectx.retC1 + Math.max(0, yearsLast);
-    }
-    // Monthly contribution (into a pot growing at the plan's blended return) to close the capital gap.
-    let monthly = null;
-    if (capitalGap > 0 && yearsToRet > 0) {
-      const n = yearsToRet * 12, rM = realRate / 12;
-      const fvFactor = rM > 0 ? (Math.pow(1 + rM, n) - 1) / rM : n;
-      monthly = fvFactor > 0 ? capitalGap / fvFactor : null;
-    }
-    return { target, swr: swr * 100, requiredCapital, projInvestable, projIncome, capitalGap, incomeGap, onTrack: capitalGap <= 0, yearsToRet, monthly, sustainable, yearsLast, depleteAge };
-  }, [retGoal, rows, ectx, baseYear, assets, assumptions.inflation, inflDec]);
-
   // ---- Protection gap analysis ----------------------------------------------------------------
   // Two layers: (1) rule-of-thumb benchmarks (house multipliers × current income), and
   // (2) the engine-driven survivor test — simulate death at a chosen age and solve for the
@@ -1987,6 +1966,72 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const upPeriod = (id, p) => setTax({ periods: tax.periods.map((x) => (x.id === id ? { ...x, ...p } : x)) });
   const addPeriod = () => setTax({ periods: [...tax.periods, { id: uid(), label: "New jurisdiction", startMode: "age", startAge: Math.max(ectx.age0c1 + 1, 65), personalAllowance: 0, bands: [{ upTo: "", rate: 0 }], cgtRate: 0 }] });
   const rmPeriod = (id) => setTax({ periods: tax.periods.filter((x) => x.id !== id) });
+
+  // ---- Goals evaluator -------------------------------------------------------------------------
+  // One verdict per goal. None re-run the projection. Retirement income and legacy work in today's
+  // money (to match the rest of the report and the estate module); the savings target is a
+  // self-contained calculator in the money of the day. All four are illustrations, not advice.
+  const blendedRealRate = useMemo(() => {
+    const inv = assets.filter((a) => a.type === "investment" || a.type === "pension");
+    const blended = inv.length ? inv.reduce((s, a) => s + (Number(a.growthRate) || 0), 0) / inv.length : (Number(assumptions.inflation) || 0) + 3;
+    return Math.max(0, (blended - (Number(assumptions.inflation) || 0)) / 100);
+  }, [assets, assumptions.inflation]);
+  // Net estate at the end of the plan, in today's money — read from the raw engine rows (not kpis,
+  // which flips with the real/nominal chart toggle), so the legacy goal is stable either way.
+  const endEstateReal = useMemo(() => {
+    if (!rows.length) return 0;
+    const r = rows[rows.length - 1];
+    const yOff = r.y != null ? r.y : rows.length - 1;
+    return Math.max(0, (r.total - (r.debt || 0))) / Math.pow(1 + inflDec, yOff);
+  }, [rows, inflDec]);
+
+  const evalGoal = (g) => {
+    if (g.kind === "retirementIncome") {
+      const target = Number(g.income) || 0;
+      const swr = Math.min(20, Math.max(0.5, Number(g.swr) || 4)) / 100;
+      if (target <= 0) return null;
+      const requiredCapital = target / swr;
+      const yearsToRet = Math.max(0, ectx.retC1 - ectx.age0c1);
+      const retYear = baseYear + yearsToRet;
+      const retRow = rows.find((r) => r.c1Age === ectx.retC1) || rows.find((r) => r.year >= retYear);
+      const projInvestable = retRow ? Math.max(0, (retRow.total || 0) - (retRow.property || 0)) / Math.pow(1 + inflDec, yearsToRet) : 0;
+      const projIncome = projInvestable * swr;
+      const capitalGap = requiredCapital - projInvestable;
+      const onTrack = capitalGap <= 0;
+      let monthly = null;
+      if (capitalGap > 0 && yearsToRet > 0) {
+        const n = yearsToRet * 12, rM = blendedRealRate / 12;
+        const fv = rM > 0 ? (Math.pow(1 + rM, n) - 1) / rM : n;
+        monthly = fv > 0 ? capitalGap / fv : null;
+      }
+      return { kind: g.kind, onTrack, swr: swr * 100, target, requiredCapital, projInvestable, projIncome, capitalGap, monthly, yearsToRet };
+    }
+    if (g.kind === "accumulation") {
+      const target = Number(g.amount) || 0;
+      const years = Math.max(0, Number(g.years) || 0);
+      const from = Math.max(0, Number(g.fromAmount) || 0);
+      const growth = Number(g.growth) || 0;
+      const n = years * 12, rM = growth / 100 / 12;
+      const grownStart = from * Math.pow(1 + rM, n);
+      const remaining = target - grownStart;
+      const fv = rM > 0 ? (Math.pow(1 + rM, n) - 1) / rM : n;
+      const monthly = remaining > 0 && n > 0 && fv > 0 ? remaining / fv : null;
+      return { kind: g.kind, onTrack: remaining <= 0, target, years, from, grownStart, remaining: Math.max(0, remaining), monthly, growth };
+    }
+    if (g.kind === "legacy") {
+      const target = Number(g.amount) || 0;
+      const useTax = !!g.afterTax && est.enabled;
+      const ec = computeEstate(endEstateReal, est, couple);
+      const projected = useTax ? ec.net : endEstateReal;
+      const gap = target - projected;
+      return { kind: g.kind, onTrack: gap <= 0, target, projected, gap: Math.max(0, gap), tax: ec.applied ? ec.tax : 0, useTax, afterTaxRequested: !!g.afterTax, taxOn: est.enabled, endYear: kpis.endYear };
+    }
+    if (g.kind === "neverRunOut") {
+      return { kind: g.kind, onTrack: kpis.depletionAge === null, depletionAge: kpis.depletionAge, depYear: kpis.depYear, endYear: kpis.endYear };
+    }
+    return null;
+  };
+
   const applyPreset = (id, key) => upPeriod(id, { personalAllowance: TAX_PRESETS[key].personalAllowance, bands: TAX_PRESETS[key].bands.map((b) => ({ ...b })), cgtRate: TAX_PRESETS[key].cgtRate });
   const upBand = (pid, idx, patch) => { const p = tax.periods.find((x) => x.id === pid); if (patch.rate != null) patch = { ...patch, rate: Math.min(99, Math.max(0, Number(patch.rate) || 0)) }; upPeriod(pid, { bands: p.bands.map((b, i) => (i === idx ? { ...b, ...patch } : b)) }); };
   const addBand = (pid) => { const p = tax.periods.find((x) => x.id === pid); upPeriod(pid, { bands: [...p.bands, { upTo: "", rate: 0 }] }); };
@@ -2133,6 +2178,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     { id: "expenditure", label: "Expenditure", Icon: Receipt },
     { id: "liabilities", label: "Liabilities", Icon: CreditCard },
     { id: "protection", label: "Protection", Icon: Shield },
+    { id: "goals", label: "Goals", Icon: Target },
     { id: "notes", label: "Adviser notes", Icon: StickyNote },
     { id: "scenarios", label: "Scenarios", Icon: Layers },
   ];
@@ -2304,35 +2350,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     </div>
                   )}
                 </div>
-                <div className="goalp">
-                  <div className="goalp-head"><span className="flbl">Retirement income goal <InfoTip text="Enter the annual retirement income the client wants. Using a sustainable withdrawal rate (4% is the common rule of thumb), this shows the capital required, the gap versus what the plan currently projects at retirement, and the extra monthly saving that would close it. A planning illustration, not advice." /></span><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:"0.68rem",textTransform:"uppercase",letterSpacing:"0.05em",color:"var(--mid)",opacity:0.7,fontWeight:600,paddingRight:2}}>Capital check</span><Toggle on={retGoal.enabled} onClick={() => upRetGoal({ enabled: !retGoal.enabled })} /></div></div>
-                  {retGoal.enabled && (<>
-                    <div className="goalp-inputs">
-                      <div className="rec-field"><label>Desired income / yr</label><Money value={retGoal.income} symbol={sym} onChange={(v) => upRetGoal({ income: v })} /></div>
-                      <div className="rec-field"><label>Withdrawal rate</label><Mini value={retGoal.swr} step={0.1} suffix="%" onChange={(v) => upRetGoal({ swr: v })} /></div>
-                    </div>
-                    {retGoalCalc && (
-                      <div className={`goalp-out ${retGoalCalc.onTrack ? "on-track" : "gap"}`}>
-                        {retGoalCalc.onTrack ? (
-                          <div className="goalp-verdict ok">✓ On track — the plan projects {fmtFull(retGoalCalc.projInvestable, cur)} of investable capital at retirement, supporting about {fmtFull(retGoalCalc.projIncome, cur)}/yr at {retGoalCalc.swr}%.</div>
-                        ) : (
-                          <div className="goalp-verdict short">Projected income falls short by <b className="goalp-redfig">{fmtFull(retGoalCalc.incomeGap, cur)}/yr</b>.</div>
-                        )}
-                        <div className="goalp-rows">
-                          <div className="goalp-row"><span>Capital required ({retGoalCalc.swr}% rule)</span><b className="num">{fmtFull(retGoalCalc.requiredCapital, cur)}</b></div>
-                          <div className="goalp-row"><span>Projected at retirement</span><b className="num">{fmtFull(retGoalCalc.projInvestable, cur)}</b></div>
-                          {!retGoalCalc.onTrack && <div className="goalp-row"><span>Capital gap</span><b className="num goalp-redfig">{fmtFull(retGoalCalc.capitalGap, cur)}</b></div>}
-                          {!retGoalCalc.onTrack && retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <div className="goalp-row"><span>Extra saving to close it</span><b className="num goalp-redfig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></div>}
-                          {!retGoalCalc.onTrack && retGoalCalc.yearsToRet === 0 && <div className="goalp-row"><span></span><span className="inl-note">Already at retirement — close the gap with additional capital or a lower income target.</span></div>}
-                          <div className="goalp-row"><span>Drawing {fmtFull(retGoalCalc.target, cur)}/yr, the pot alone</span><b className="num">{retGoalCalc.sustainable ? "is self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "—"}</b></div>
-                        </div>
-                        <span className="field-note">Today's money; 'investable capital' excludes property. The 'lasts to ~age' figure is a rule-of-thumb: it assumes the pot is invested for income at the real return of your investments and pensions — or a balanced default if the plan holds none — and is drawn down on its own, with no other income counted. Because it ignores your actual asset mix and other income, it can differ from the plan's own year-by-year projection, which is the figure to rely on. Extra saving assumes the same return over {retGoalCalc.yearsToRet} years. Illustration, not advice.</span>
-                        <span className="field-note" style={{marginTop:4,paddingTop:4,borderTop:"1px solid var(--border)",opacity:0.75}}>This is a <b>capital check</b> — it asks whether the pot at retirement hits a target number. The <b>What-if panel</b> runs a full lifetime simulation year by year, including all income and contributions, so the two can give different verdicts for the same plan. Both are valid; they answer different questions.</span>
-                      </div>
-                    )}
-                  </>)}
-                </div>
-                <p className="ed-hint">Per-asset growth is set on each asset. Mortality is set per client. Charges &amp; fees module is next once we map your fee structure.</p>
+                <p className="ed-hint">Per-asset growth is set on each asset. Mortality is set per client. Client targets — retirement income, savings goals, legacy — now live in the <b>Goals</b> section. Charges &amp; fees module is next once we map your fee structure.</p>
               </div>
             )}
             {section === "tax" && (
@@ -2648,6 +2666,98 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 )}
               </div>
             )}
+            {section === "goals" && (
+              <div className="ed-body">
+                <div className="ed-head"><h2 className="ed-title">Goals</h2><div className="ed-head-tools"><button className="add-btn" onClick={() => addGoal("accumulation")}><Plus size={15} /> Add goal</button></div></div>
+                {goals.length === 0 && <p className="empty-note">No goals yet. Add the targets the client actually asks about — an income in retirement, a pot for the children, a legacy to leave, or simply not running out — and each shows whether the plan gets there and what would close any gap.</p>}
+                {goals.map((g) => {
+                  const v = evalGoal(g);
+                  return (
+                    <div className="goalp" key={g.id}>
+                      <div className="goalp-head">
+                        <div className="gcard-id"><Text className="gcard-name" value={g.name} placeholder="Goal name" onChange={(val) => upGoal(g.id, { name: val })} /></div>
+                        <div className="gcard-tools">
+                          <Pick value={g.kind} onChange={(k) => upGoal(g.id, { kind: k, name: GOAL_KIND_LABEL[k] })} options={GOAL_KINDS} />
+                          <QuickDel onConfirm={() => rmGoal(g.id)} />
+                        </div>
+                      </div>
+                      {g.kind === "retirementIncome" && (
+                        <div className="goalp-inputs">
+                          <div className="rec-field"><label>Desired income / yr</label><Money value={g.income} symbol={sym} onChange={(val) => upGoal(g.id, { income: val })} /></div>
+                          <div className="rec-field"><label>Withdrawal rate <InfoTip text="The share of the pot drawn each year. 4% is the common rule of thumb — lower is more cautious." /></label><Mini value={g.swr} step={0.1} suffix="%" onChange={(val) => upGoal(g.id, { swr: val })} /></div>
+                        </div>
+                      )}
+                      {g.kind === "accumulation" && (
+                        <div className="goalp-inputs">
+                          <div className="rec-field"><label>Target amount</label><Money value={g.amount} symbol={sym} onChange={(val) => upGoal(g.id, { amount: val })} /></div>
+                          <div className="rec-field"><label>Reach it in</label><Mini value={g.years} suffix="yrs" onChange={(val) => upGoal(g.id, { years: val })} /></div>
+                          <div className="rec-field"><label>Starting from</label><Money value={g.fromAmount} symbol={sym} onChange={(val) => upGoal(g.id, { fromAmount: val })} /></div>
+                          <div className="rec-field"><label>Growth / yr <InfoTip text="The annual return you assume on the money set aside. Try a cautious and an ambitious figure to show the client the difference it makes." /></label><Mini value={g.growth} step={0.1} suffix="%" onChange={(val) => upGoal(g.id, { growth: val })} /></div>
+                        </div>
+                      )}
+                      {g.kind === "legacy" && (
+                        <div className="goalp-inputs">
+                          <div className="rec-field"><label>Amount to leave</label><Money value={g.amount} symbol={sym} onChange={(val) => upGoal(g.id, { amount: val })} /></div>
+                          <div className="rec-field rec-toggle"><label>After estate tax <InfoTip text="On: compares against what's left after estate/IHT, using the rates in Tax & Jurisdiction. Off: compares against the estate before any tax." /></label><Toggle on={!!g.afterTax} onClick={() => upGoal(g.id, { afterTax: !g.afterTax })} /></div>
+                        </div>
+                      )}
+                      {g.kind === "neverRunOut" && (
+                        <p className="field-note" style={{ margin: "2px 0 0" }}>Checks the plan exactly as it stands — no inputs needed.</p>
+                      )}
+                      {v && g.kind === "retirementIncome" && (
+                        <div className={`goalp-out ${v.onTrack ? "on-track" : "gap"}`}>
+                          {v.onTrack
+                            ? <div className="goalp-verdict ok">✓ On track — the plan projects {fmtFull(v.projInvestable, cur)} of investable capital at retirement, supporting about {fmtFull(v.projIncome, cur)}/yr at {v.swr}%.</div>
+                            : <div className="goalp-verdict short">To draw {fmtFull(v.target, cur)}/yr you'd need about <b>{fmtFull(v.requiredCapital, cur)}</b> at retirement — the plan projects {fmtFull(v.projInvestable, cur)}.</div>}
+                          <div className="goalp-rows">
+                            {!v.onTrack && <div className="goalp-row"><span>Capital gap</span><b className="num goalp-redfig">{fmtFull(v.capitalGap, cur)}</b></div>}
+                            {!v.onTrack && v.monthly != null && v.yearsToRet > 0 && <div className="goalp-row"><span>Extra saving to close it</span><b className="num goalp-redfig">{sym}{Math.ceil(v.monthly).toLocaleString()}/mo</b></div>}
+                            {!v.onTrack && v.yearsToRet === 0 && <div className="goalp-row"><span /><span className="inl-note">Already at retirement — close the gap with extra capital or a lower income target.</span></div>}
+                          </div>
+                          <span className="field-note">Today's money; investable capital excludes property and uses a {v.swr}% sustainable withdrawal rate. Extra saving assumes your investments' real return over {v.yearsToRet} years. A planning illustration, not advice.</span>
+                        </div>
+                      )}
+                      {v && g.kind === "accumulation" && (
+                        <div className={`goalp-out ${v.onTrack ? "on-track" : "gap"}`}>
+                          {v.onTrack
+                            ? <div className="goalp-verdict ok">✓ On track — {v.from > 0 ? <>your starting {fmtFull(v.from, cur)} grows to about {fmtFull(v.grownStart, cur)} in {v.years} years</> : "no further saving needed at these inputs"}, ahead of the {fmtFull(v.target, cur)} target.</div>
+                            : <div className="goalp-verdict short">To reach <b>{fmtFull(v.target, cur)}</b> in {v.years} years you'd save about <b className="goalp-redfig">{sym}{v.monthly != null ? Math.ceil(v.monthly).toLocaleString() : "—"}/mo</b>.</div>}
+                          <div className="goalp-rows">
+                            {v.from > 0 && <div className="goalp-row"><span>Starting amount grows to</span><b className="num">{fmtFull(v.grownStart, cur)}</b></div>}
+                            {!v.onTrack && <div className="goalp-row"><span>Still to fund</span><b className="num">{fmtFull(v.remaining, cur)}</b></div>}
+                            {!v.onTrack && v.monthly != null && <div className="goalp-row"><span>Monthly saving needed</span><b className="num goalp-redfig">{sym}{Math.ceil(v.monthly).toLocaleString()}/mo</b></div>}
+                          </div>
+                          <span className="field-note">Assumes {v.growth}% annual growth, in the money of the day (not adjusted for inflation). A planning illustration, not advice.</span>
+                        </div>
+                      )}
+                      {v && g.kind === "legacy" && (
+                        <div className={`goalp-out ${v.onTrack ? "on-track" : "gap"}`}>
+                          {v.onTrack
+                            ? <div className="goalp-verdict ok">✓ On track — the plan projects leaving about {fmtFull(v.projected, cur)}{v.useTax ? " after estate tax" : ""}, ahead of the {fmtFull(v.target, cur)} goal.</div>
+                            : <div className="goalp-verdict short">The plan projects leaving about <b>{fmtFull(v.projected, cur)}</b>{v.useTax ? " after estate tax" : ""} — {fmtFull(v.gap, cur)} short of the {fmtFull(v.target, cur)} goal.</div>}
+                          <div className="goalp-rows">
+                            <div className="goalp-row"><span>Goal</span><b className="num">{fmtFull(v.target, cur)}</b></div>
+                            <div className="goalp-row"><span>Projected estate ({v.endYear}){v.useTax ? ", after tax" : ""}</span><b className="num">{fmtFull(v.projected, cur)}</b></div>
+                            {v.useTax && v.tax > 0 && <div className="goalp-row"><span>Estate tax</span><b className="num">{fmtFull(v.tax, cur)}</b></div>}
+                            {!v.onTrack && <div className="goalp-row"><span>Shortfall</span><b className="num goalp-redfig">{fmtFull(v.gap, cur)}</b></div>}
+                          </div>
+                          <span className="field-note">{v.afterTaxRequested && !v.taxOn ? "Turn on Estate & succession tax in Tax & Jurisdiction to show the after-tax figure. " : ""}Based on the plan's projected estate at the end of the plan, in today's money. The What-if panel shows the levers that move it. An observation, not advice.</span>
+                        </div>
+                      )}
+                      {v && g.kind === "neverRunOut" && (
+                        <div className={`goalp-out ${v.onTrack ? "on-track" : "gap"}`}>
+                          {v.onTrack
+                            ? <div className="goalp-verdict ok">✓ On track — the plan's spendable assets last to the end of the plan in {v.endYear}.</div>
+                            : <div className="goalp-verdict short">Spendable assets are projected to run short at <b className="goalp-redfig">age {v.depletionAge}</b> ({v.depYear}).</div>}
+                          <span className="field-note">Read straight from the plan's year-by-year projection. The What-if panel shows what would extend it. An observation, not advice.</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <p className="ed-hint">Goals are saved with this client and can be included in the report. Each answers one question simply; the What-if panel and the full chart remain the place to explore trade-offs in depth.</p>
+              </div>
+            )}
             {section === "notes" && (
               <div className="ed-body">
                 <h2 className="ed-title">Adviser notes</h2>
@@ -2663,7 +2773,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "scenarios" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Scenarios</h2>{onScenarioAction && <button className="add-btn" onClick={() => onScenarioAction({ type: "create", name: null, data: { profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes } })}><Plus size={15} /> New from current</button>}</div>
+                <div className="ed-head"><h2 className="ed-title">Scenarios</h2>{onScenarioAction && <button className="add-btn" onClick={() => onScenarioAction({ type: "create", name: null, data: { profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals } })}><Plus size={15} /> New from current</button>}</div>
                 {!onScenarioAction && <p className="empty-note">Scenario management is available in the full app with a signed-in adviser account.</p>}
                 {onScenarioAction && (scenarios || []).map((sc) => {
                   const isActive = sc.id === activeScenarioId;
@@ -3248,6 +3358,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             { id: "stress", label: "Stress test result", off: !stressActive, why: "no stress test active" },
             { id: "mcconf", label: "Plan confidence (Monte Carlo)", off: false },
             { id: "protection", label: "Protection & gap analysis", off: protection.length === 0 && !(protGap && protGap.bench.some((b) => b.inc > 0)), why: "no policies or income entered" },
+            { id: "goals", label: "Goals", off: !goals.length, why: "no goals set" },
             { id: "whatif", label: "\u201CWhat if I asked\u2026\u201D answers", off: !goal, why: "" },
             { id: "inputs", label: "Detailed inputs", },
             { id: "assumptions", label: "Assumptions" },
@@ -3256,8 +3367,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           ];
           const on = (id) => { const d = SECTION_DEFS.find((x) => x.id === id); return S[id] && d && !d.off; };
           const setPreset = (kind) => {
-            const brief = { exec: true, snapshot: false, yeartable: true, charts: true, cashgap: false, stress: false, mcconf: false, protection: false, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
-            const comp = { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, mcconf: true, protection: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
+            const brief = { exec: true, snapshot: false, yeartable: true, charts: true, cashgap: false, stress: false, mcconf: false, protection: false, goals: true, whatif: false, inputs: false, assumptions: true, taxov: false, commentary: false };
+            const comp = { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, mcconf: true, protection: true, goals: true, whatif: true, inputs: true, assumptions: true, taxov: true, commentary: true };
             upReportCfg({ sections: kind === "brief" ? brief : comp });
           };
           const verdictText = kpis.depletionAge === null
@@ -3727,6 +3838,65 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </section>
                 )}
 
+                {/* Goals */}
+                {on("goals") && goals.length > 0 && (
+                  <section className="report-page">
+                    <RepHead />
+                    <h2 className="rep-h2">Goals</h2>
+                    <p className="rep-p">Progress towards the targets agreed with the client. Each is a planning illustration based on the assumptions in this report — not advice.</p>
+                    {goals.map((g) => {
+                      const v = evalGoal(g);
+                      if (!v) return null;
+                      return (
+                        <div key={g.id} className="rep-goal">
+                          <p className="rep-p" style={{ fontWeight: 700, marginBottom: 4 }}>{g.name} <span style={{ fontWeight: 400, color: "#667" }}>· {GOAL_KIND_LABEL[g.kind]}</span></p>
+                          {g.kind === "retirementIncome" && (
+                            <table className="rep-table"><tbody>
+                              <tr><td>Target income</td><td className="r num">{m(v.target)}/yr at {v.swr}%</td></tr>
+                              <tr><td>Capital required</td><td className="r num">{m(v.requiredCapital)}</td></tr>
+                              <tr><td>Projected investable capital at retirement</td><td className="r num">{m(v.projInvestable)}</td></tr>
+                              {v.onTrack
+                                ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
+                                : <><tr><td>Capital gap</td><td className="r num"><b className="rep-gap-fig">{m(v.capitalGap)}</b></td></tr>
+                                   {v.monthly != null && v.yearsToRet > 0 && <tr><td>Additional saving to close it</td><td className="r num"><b className="rep-gap-fig">{sym}{Math.ceil(v.monthly).toLocaleString()}/mo</b></td></tr>}</>}
+                            </tbody></table>
+                          )}
+                          {g.kind === "accumulation" && (
+                            <table className="rep-table"><tbody>
+                              <tr><td>Target</td><td className="r num">{m(v.target)} in {v.years} years</td></tr>
+                              <tr><td>Assumed growth</td><td className="r num">{v.growth}%/yr</td></tr>
+                              {v.from > 0 && <tr><td>Starting amount grows to</td><td className="r num">{m(v.grownStart)}</td></tr>}
+                              {v.onTrack
+                                ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
+                                : <><tr><td>Still to fund</td><td className="r num">{m(v.remaining)}</td></tr>
+                                   {v.monthly != null && <tr><td>Monthly saving needed</td><td className="r num"><b className="rep-gap-fig">{sym}{Math.ceil(v.monthly).toLocaleString()}/mo</b></td></tr>}</>}
+                            </tbody></table>
+                          )}
+                          {g.kind === "legacy" && (
+                            <table className="rep-table"><tbody>
+                              <tr><td>Goal{v.useTax ? " (after estate tax)" : ""}</td><td className="r num">{m(v.target)}</td></tr>
+                              <tr><td>Projected estate ({v.endYear}){v.useTax ? ", after tax" : ""}</td><td className="r num">{m(v.projected)}</td></tr>
+                              {v.useTax && v.tax > 0 && <tr><td>Estate tax</td><td className="r num">{m(v.tax)}</td></tr>}
+                              {v.onTrack
+                                ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
+                                : <tr><td>Shortfall</td><td className="r num"><b className="rep-gap-fig">{m(v.gap)}</b></td></tr>}
+                            </tbody></table>
+                          )}
+                          {g.kind === "neverRunOut" && (
+                            <table className="rep-table"><tbody>
+                              {v.onTrack
+                                ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>Funded to plan end ({v.endYear})</b></td></tr>
+                                : <tr><td>Projected to run short</td><td className="r num"><b className="rep-gap-fig">age {v.depletionAge} ({v.depYear})</b></td></tr>}
+                            </tbody></table>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <p className="rep-p rep-small">Retirement income and legacy figures are in today's money; the savings target is in the money of the day at the growth shown. Each holds the rest of the plan constant. Planning illustrations, not recommendations or guarantees.</p>
+                    <RepFoot />
+                  </section>
+                )}
+
                 {/* What-if answers */}
                 {on("whatif") && goal && (
                   <section className="report-page">
@@ -3745,22 +3915,6 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <tr><td>Projected estate at the end of the plan</td><td className="r num">{m(goal.estateEnd)} ({goal.estateEndYear})</td></tr>
                       </tbody>
                     </table>
-                    {retGoalCalc && (<>
-                      <h2 className="rep-h2" style={{ marginTop: 22 }}>Retirement income goal</h2>
-                      <p className="rep-p">Target income of <b>{m(retGoalCalc.target)}/yr</b> at a {retGoalCalc.swr}% sustainable withdrawal rate.</p>
-                      <table className="rep-table">
-                        <tbody>
-                          <tr><td>Capital required</td><td className="r num">{m(retGoalCalc.requiredCapital)}</td></tr>
-                          <tr><td>Projected investable capital at retirement</td><td className="r num">{m(retGoalCalc.projInvestable)}</td></tr>
-                          {retGoalCalc.onTrack
-                            ? <tr><td>Status</td><td className="r"><b style={{ color: "#1b7a4b" }}>On track</b></td></tr>
-                            : <><tr><td>Capital gap</td><td className="r num"><b className="rep-gap-fig">{m(retGoalCalc.capitalGap)}</b></td></tr>
-                               {retGoalCalc.monthly != null && retGoalCalc.yearsToRet > 0 && <tr><td>Additional saving to close the gap</td><td className="r num"><b className="rep-gap-fig">{sym}{Math.ceil(retGoalCalc.monthly).toLocaleString()}/mo</b></td></tr>}</>}
-                          <tr><td>Pot alone, drawing {m(retGoalCalc.target)}/yr</td><td className="r num">{retGoalCalc.sustainable ? "self-sustaining" : retGoalCalc.depleteAge != null ? `lasts to ~age ${retGoalCalc.depleteAge}` : "\u2014"}</td></tr>
-                        </tbody>
-                      </table>
-                      <p className="rep-p rep-small">Figures in today's money; investable capital excludes property. The required capital applies the stated withdrawal rate as a rule of thumb. The 'pot alone, lasts to ~age' line assumes the pot is invested for income at the real return of any investments and pensions (or a balanced default if none) and drawn on its own, with no other income — so it can differ from the plan's full year-by-year projection elsewhere in this report. A planning illustration, not a recommendation or a guarantee of sustainable income.</p>
-                    </>)}
                     <RepFoot />
                   </section>
                 )}
@@ -4070,6 +4224,11 @@ const CSS = `
 .goalp-row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mid);gap:10px;}
 .goalp-row .num{color:var(--ink);}
 .goalp-redfig{color:#c62828;font-weight:700;}
+.gcard-id{flex:1;min-width:0;margin-right:10px;}
+.gcard-name{font-weight:650;font-size:13.5px;}
+.gcard-tools{display:flex;align-items:center;gap:8px;flex:none;}
+.rep-goal{margin-bottom:16px;}
+.rep-goal:last-of-type{margin-bottom:0;}
 .tip-stress span{color:var(--red);}
 .tip-stress b{color:var(--red);}
 .tip-stress-delta{color:var(--red);font-weight:600;}
