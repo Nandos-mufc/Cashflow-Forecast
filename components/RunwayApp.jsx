@@ -1103,12 +1103,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const defaultReportCfg = () => ({
     sections: { exec: true, snapshot: true, yeartable: true, charts: true, cashgap: true, stress: true, protection: true, goals: true, whatif: false, inputs: true, assumptions: true, taxov: true, commentary: true },
     anonymous: false, adviser: "", firm: "",
+    notesOn: true,
+    notes: { networth: "", mimo: "", cashgap: "", stress: "", mcconf: "", protection: "", goals: "" },
   });
   // Per-plan report preferences. Priority: the plan's own saved reportCfg → legacy global localStorage
   // (so existing users keep their layout the first time) → defaults. Once set, it travels with the plan
   // via onChange (i.e. into Supabase), so each client can have its own report layout.
   const [reportCfg, setReportCfg] = useState(() => {
-    const merge = (saved) => saved ? { ...defaultReportCfg(), ...saved, sections: { ...defaultReportCfg().sections, ...(saved.sections || {}) } } : null;
+    const merge = (saved) => saved ? { ...defaultReportCfg(), ...saved, sections: { ...defaultReportCfg().sections, ...(saved.sections || {}) }, notes: { ...defaultReportCfg().notes, ...(saved.notes || {}) } } : null;
     const fromPlan = merge(seed.reportCfg);
     if (fromPlan) return fromPlan;
     if (typeof window === "undefined") return defaultReportCfg();
@@ -1541,6 +1543,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Update prefs in state. We deliberately do NOT write to the global localStorage key any more —
   // persistence is per-plan through onChange. (The legacy key is still read once above for migration.)
   const upReportCfg = (patch) => setReportCfg((c) => ({ ...c, ...patch, sections: { ...c.sections, ...(patch.sections || {}) } }));
+  const upNote = (key, text) => setReportCfg((c) => ({ ...c, notes: { ...(c.notes || {}), [key]: text } }));
   const stressActive = !!stressImpact;
 
   // Year-by-year summary at key ages — the Voyant/CashCalc-style table for the report.
@@ -3381,6 +3384,18 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           // "Mark dies age 47" onto base-plan pages, so "100% funded for life" read as a contradiction.
           const RepFoot = () => <div className="rep-foot">Illustration only — not financial advice · {clientName} · {reportDate}{reportCfg.firm ? ` · ${reportCfg.firm}` : ""}</div>;
           const RepHead = () => <div className="rep-runhead" aria-hidden="true"><span className="rep-rh-brand"><svg viewBox="0 0 48 54" width="14" height="16" fill="none"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="7" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.6" fill="#C8A951" /></svg>Meridian</span><span className="rep-rh-doc">{clientName} · Cashflow plan</span></div>;
+          // Per-page Notes panel. Always present (unless globally switched off) so each page reads as
+          // deliberate; filled in the adviser's own words, blank pages show a clean labelled space.
+          const RepNotes = ({ k }) => {
+            if (reportCfg.notesOn === false) return null;
+            const txt = ((reportCfg.notes || {})[k] || "").trim();
+            return (
+              <div className={`rep-notes ${txt ? "filled" : "empty"}`}>
+                <div className="rep-notes-label">Notes</div>
+                {txt ? <p className="rep-notes-text">{txt}</p> : null}
+              </div>
+            );
+          };
           const assetMix = (() => { const by = {}; assets.forEach((a) => { by[a.type] = (by[a.type] || 0) + (Number(a.value) || 0); }); return Object.entries(by).filter(([, v]) => v > 0).map(([type, value]) => ({ type, value, name: TYPE_LABEL[type] })); })();
           const y0 = rows[0] || {}; const inc0 = y0.income || 0; const exp0 = y0.expenditure || 0;
 
@@ -3436,6 +3451,31 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <div className="rcfg-id">
                   <div className="rec-field"><label>Prepared by</label><Text value={reportCfg.adviser} placeholder="Adviser name" onChange={(v) => upReportCfg({ adviser: v })} /></div>
                   <div className="rec-field"><label>Firm</label><Text value={reportCfg.firm} placeholder="Firm name (optional)" onChange={(v) => upReportCfg({ firm: v })} /></div>
+                </div>
+                <div className="rcfg-line rcfg-notes-block">
+                  <label className="rcfg-row"><input type="checkbox" checked={reportCfg.notesOn !== false} onChange={(e) => upReportCfg({ notesOn: e.target.checked })} /><span>Notes under each page <em>— type what you discussed for the client; pages you leave blank simply show a clean, labelled space</em></span></label>
+                  {reportCfg.notesOn !== false && (() => {
+                    const pages = [
+                      ["networth", "Projected net worth", on("charts")],
+                      ["mimo", "Money in vs out", on("charts")],
+                      ["cashgap", "Cash gap", on("cashgap") && !!reportCashGap],
+                      ["stress", "Stress test", on("stress") && !!stressImpact],
+                      ["mcconf", "Plan confidence", on("mcconf")],
+                      ["protection", "Protection", on("protection") && (!!protSnap || !!protGap)],
+                      ["goals", "Goals", on("goals") && goals.length > 0],
+                    ].filter((p) => p[2]);
+                    if (!pages.length) return <p className="rcfg-note-empty">Note fields appear here for each visual page you include above.</p>;
+                    return (
+                      <div className="rcfg-notes">
+                        {pages.map(([key, label]) => (
+                          <div className="rcfg-note-field" key={key}>
+                            <label>{label}</label>
+                            <textarea rows={2} value={(reportCfg.notes || {})[key] || ""} placeholder="Optional — leave blank if nothing to add" onChange={(e) => upNote(key, e.target.value)} />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
                 {on("commentary") && (
                   <div className="rcfg-comm">
@@ -3610,6 +3650,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {hasProperty && <span><i className="rep-dash" /> Spendable (excl. property)</span>}
                     {hasDebt && <span><i className="rep-solid" /> Net worth after debts</span>}
                   </div>
+                  <RepNotes k="networth" />
                   <RepFoot />
                 </section>
                 <section className="report-page">
@@ -3635,6 +3676,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <span><i className="rep-solid" /> Total spending</span>
                     {hasContrib && <span><i className="rep-dash" /> + savings/contributions</span>}
                   </div>
+                  <RepNotes k="mimo" />
                   <RepFoot />
                 </section>
                 </>)}
@@ -3671,6 +3713,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       <p className="rep-p">{reportCashGap.uncoveredCount > 0 ? "Where the gap cannot be met, spending in those years exceeds both income and remaining accessible assets — shown in red on the money chart." : "Every gap year is fully met from accessible assets under the current assumptions."} Figures in {basis.toLowerCase()}.</p>
                     </>)}
                     {stressActive && <p className="rep-p rep-small">Computed on the base plan — the active stress scenario is reported on its own page.</p>}
+                    <RepNotes k="cashgap" />
                     <RepFoot />
                   </section>
                 )}
@@ -3733,6 +3776,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       </ComposedChart>
                     </div>
                     <div className="rep-legend"><span><i className="rep-solid" /> Base plan net worth</span><span><i className="rep-solid" style={{ background: "#d64545" }} /> Under the scenario</span><span><i style={{ background: "#f3cccc" }} /> Shortfall vs base plan</span></div>
+                    <RepNotes k="stress" />
                     <RepFoot />
                   </section>
                   );
@@ -3786,6 +3830,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       </div>
                       <div className="rep-legend"><span><i style={{ background: "#2f6fb0", opacity: 0.26 }} /> Middle 50% of outcomes</span><span><i style={{ background: "#2f6fb0", opacity: 0.13 }} /> Middle 80%</span><span><i className="rep-solid" style={{ background: "#2f6fb0" }} /> Median path</span></div>
                       <p className="rep-p rep-sub">Spendable assets exclude property, in {showReal ? "today's money" : "future money"}. Returns are modelled as normal variation with a shared market factor; real markets carry occasional larger shocks, so this is an indicator of resilience, not a precise probability or a forecast.</p>
+                      <RepNotes k="mcconf" />
                       <RepFoot />
                     </section>
                   );
@@ -3834,6 +3879,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         : `At the first death assumed in this plan (${insuredLabel(protSnap.firstDeath.who)}, ${protSnap.firstDeath.year}), no recorded cover pays out — the policy terms end before that age.`}</p>
                     )}
                     <p className="rep-p">This section records the cover in force and how it interacts with this projection. A full protection-needs analysis is a separate exercise.</p>
+                    <RepNotes k="protection" />
                     <RepFoot />
                   </section>
                 )}
@@ -3893,6 +3939,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       );
                     })}
                     <p className="rep-p rep-small">Retirement income and legacy figures are in today's money; the savings target is in the money of the day at the growth shown. Each holds the rest of the plan constant. Planning illustrations, not recommendations or guarantees.</p>
+                    <RepNotes k="goals" />
                     <RepFoot />
                   </section>
                 )}
@@ -4549,8 +4596,20 @@ const CSS = `
 .rcfg-comm{margin-top:14px;}
 .rcfg-comm-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
 .rcfg-comm-area{min-height:150px;font-size:12.5px;}
+.rcfg-notes-block{padding-top:10px;border-top:1px solid var(--border);}
+.rcfg-notes{margin:9px 0 0 26px;display:flex;flex-direction:column;gap:9px;}
+.rcfg-note-field{display:flex;flex-direction:column;gap:3px;}
+.rcfg-note-field label{font-size:11.5px;font-weight:600;color:var(--mid);}
+.rcfg-note-field textarea{font-family:inherit;font-size:12.5px;color:var(--ink);background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 10px;resize:vertical;min-height:38px;line-height:1.45;}
+.rcfg-note-field textarea:focus{outline:none;border-color:var(--accent);}
+.rcfg-note-empty{font-size:12px;color:var(--mid);font-style:italic;margin:6px 0 0 26px;}
 /* New report elements */
 .rep-foot{margin-top:auto;padding-top:14px;font-size:9.5px;color:#9aa3ae;border-top:1px solid #eceff3;text-align:center;}
+.rep-notes{margin-top:20px;border:1px solid #e6e9ee;border-left:3px solid #0CA5A5;border-radius:10px;background:#f5fafa;padding:13px 16px;min-height:128px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+.rep-notes.empty{background:#f7f9fb;border-left-color:#ccd6da;}
+.rep-notes-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#0a8a8a;margin-bottom:6px;}
+.rep-notes.empty .rep-notes-label{color:#8a96a2;}
+.rep-notes-text{font-size:12.5px;color:#3a424d;line-height:1.55;margin:0;white-space:pre-wrap;}
 .report-page{display:flex;flex-direction:column;}
 .rep-lede{font-size:14px;}
 .rep-small{font-size:10.5px;color:#6b7480;}
@@ -4650,7 +4709,7 @@ const CSS = `
   .report-sheet { margin: 0; border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
   .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
   .report-page.report-last { page-break-after: auto; }
-  .rep-table, .rep-kpi, .rep-chart, .rep-verdict { break-inside: avoid; }
+  .rep-table, .rep-kpi, .rep-chart, .rep-verdict, .rep-notes { break-inside: avoid; }
   .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
   .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
   .rep-rh-doc { font-size: 10px; color: #7a8493; }
