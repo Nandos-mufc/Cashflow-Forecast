@@ -1860,7 +1860,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const goal = useMemo(() => {
     if (!goalOpen && !reportOpen) return null;
     const funded = (inp) => !projectCashflow(inp).some((r) => r.shortfall > 0);
-    const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection };
+    const base = { profile, assumptions, assets, incomes, expenses, liabilities, protection, autoInvestSurplus: assumptions.autoInvestSurplus !== false };
     const fundedNow = funded(base);
     // --- Margin of safety -------------------------------------------------------------------
     // Everyday affordability answers (spend / retire / new monthly cost, and the fixes when a plan
@@ -2784,7 +2784,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                             {!v.onTrack && <div className="goalp-row"><span>Still to fund</span><b className="num">{fmtFull(v.remaining, cur)}</b></div>}
                             {!v.onTrack && v.monthly != null && <div className="goalp-row"><span>Monthly saving needed</span><b className="num goalp-redfig">{sym}{Math.ceil(v.monthly).toLocaleString()}/mo</b></div>}
                           </div>
-                          <span className="field-note">Assumes {v.growth}% annual growth, in the money of the day (not adjusted for inflation). A planning illustration, not advice.</span>
+                          <span className="field-note">Assumes {v.growth}% annual growth, compounded monthly (so the effective yearly rate is a little higher), in the money of the day (not adjusted for inflation). A planning illustration, not advice.</span>
                         </div>
                       )}
                       {v && g.kind === "legacy" && (
