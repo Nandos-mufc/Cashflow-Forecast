@@ -1072,7 +1072,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // this fix may have drawdown:true on a property — correct it on load. The adviser can still turn
   // drawdown on explicitly (e.g. for a BTL they plan to sell), but it must be a conscious choice.
   const sanitiseAssets = (as) => as.map((a) => a.type === "property" && a.drawdown ? { ...a, drawdown: false } : a);
-  const [theme, setTheme] = useState("light");
+  const THEME_KEY = "meridian_theme";
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    try { const tv = localStorage.getItem(THEME_KEY); return tv === "dark" || tv === "light" ? tv : "light"; } catch { return "light"; }
+  });
   const [present, setPresent] = useState(false);
   const [section, setSection] = useState("assets");
   const [chartView, setChartView] = useState("composition");
@@ -1149,12 +1153,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return () => clearTimeout(id);
   }, [profile, assumptions, assets, incomes, expenses, liabilities, protection, annotations, adviserNotes, goals, reportCfg, mcResult]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches dark/light.
+  // Publish the theme to the document root so the surrounding app shell (top bar, dashboard chrome) matches
+  // dark/light, and persist the adviser's choice so it survives navigation, scenario switches, opening another
+  // client and refreshes. The attribute is intentionally left in place on unmount (not restored) so the choice
+  // carries across in-app pages rather than snapping back to light when this editor unmounts.
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const prev = document.documentElement.getAttribute("data-theme");
+    try { localStorage.setItem(THEME_KEY, theme); } catch {}
     document.documentElement.setAttribute("data-theme", theme);
-    return () => { if (prev) document.documentElement.setAttribute("data-theme", prev); else document.documentElement.removeAttribute("data-theme"); };
   }, [theme]);
 
   // What-if overlay — adjusts the inputs that feed the projection without changing the saved plan
@@ -1537,6 +1543,24 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     const scenarioNote = active ? " under this scenario" : "";
     return { tone, Icon: tone === "red" ? XCircle : AlertTriangle, text: `Spendable assets run short in ${depYr}, around ${who} (${tail})${scenarioNote}${propNote}.` };
   }, [kpis, assets]);
+
+  // End-of-plan composition. When spendable assets have run short but an unsold home remains, the
+  // "Left at plan end" headline equals the property value — an accurate net-worth figure that can read
+  // as spendable cash to a client. This splits it so the headline can say what's actually left. We do
+  // NOT change the number (it is genuinely the net worth at plan end); we only label what it's made of.
+  const endSplit = useMemo(() => {
+    if (!data.length) return null;
+    const last = data[data.length - 1];
+    const scen = !!(stress || ci || survivorOverlay);
+    const spendable = Math.max(0, scen && last.sInvestable != null ? last.sInvestable : last.investable);
+    const property = Math.max(0, last.property || 0);
+    const depleted = (kpis.s ? kpis.s.depletionAge : kpis.depletionAge) !== null;
+    const hasNonDrawableProperty = assets.some((a) => a.type === "property" && !a.drawdown);
+    // Treat as "property only" when funds did run short, a non-drawn home is held, and what's left is
+    // overwhelmingly that home (any spendable remainder is rounding-level, not a usable balance).
+    const propertyOnly = depleted && hasNonDrawableProperty && property > 0 && spendable <= Math.max(1, property * 0.01);
+    return { spendable, property, propertyOnly };
+  }, [data, kpis, assets, stress, ci, survivorOverlay]);
 
   const eventList = useMemo(() => {
     const ev = [];
@@ -2854,7 +2878,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           <div className="stats">
             <Stat label="Net worth today" value={fmtCompact(kpis.currentTotal, cur)} sub={couple ? `${fn1} ${ectx.age0c1} (${baseYear}) · ${fn2} ${ectx.age0c2} (${baseYear})` : `age ${ectx.age0c1} (${baseYear})`} />
             <Stat label={kpis.s ? "At retirement · scenario" : "At retirement"} value={fmtCompact(kpis.s ? kpis.s.atRetirement : kpis.atRetirement, cur)} sub={kpis.s ? `base ${fmtCompact(kpis.atRetirement, cur)}` : (ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`)} tone={kpis.s && kpis.s.atRetirement < kpis.atRetirement ? "red" : undefined} />
-            <Stat label={kpis.s ? "Left at plan end · scenario" : "Left at plan end"} value={fmtCompact(kpis.s ? kpis.s.endVal : kpis.endVal, cur)} sub={kpis.s ? `base ${fmtCompact(kpis.endVal, cur)}` : `in ${kpis.endYear}`} tone={kpis.s && kpis.s.endVal < kpis.endVal ? "red" : undefined} />
+            <Stat label={kpis.s ? "Left at plan end · scenario" : "Left at plan end"} value={fmtCompact(kpis.s ? kpis.s.endVal : kpis.endVal, cur)} sub={endSplit && endSplit.propertyOnly ? `property only · spendable ran out age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}` : (kpis.s ? `base ${fmtCompact(kpis.endVal, cur)}` : `in ${kpis.endYear}`)} tone={kpis.s && kpis.s.endVal < kpis.endVal ? "red" : undefined} />
             <Stat label={kpis.s ? "Plan longevity · scenario" : "Plan longevity"} value={(kpis.s ? kpis.s.depletionAge : kpis.depletionAge) === null ? "Fully funded" : `Age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}`} sub={kpis.s ? ((kpis.s.depletionAge === null ? "holds under scenario" : "funds short under scenario")) : (kpis.depletionAge === null ? `to ${kpis.endYear}` : kpis.depName ? `${kpis.depName} · spendable funds short` : "spendable funds run short")} tone={kpis.s ? kpis.s.tone : kpis.tone} />
           </div>
 
