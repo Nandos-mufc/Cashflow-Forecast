@@ -2482,7 +2482,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "assets" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments</h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={assets.length} onConfirm={clearAssets} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Assets &amp; investments <SectionHelp content={{ what: "Every savings pot, pension, property and cash holding that belongs to the plan. Each asset grows at its own assumed rate and can be drawn down automatically when spending exceeds income.", why: "The engine compounds each pot year-by-year at the growth rate you set. When spending outruns income, pots are drawn down in the order set under Assumptions. Pensions are only accessible once the owner reaches their retirement age.", tip: "Enter growth rates net of fund and platform charges — there's no separate fees field, so a fund expected to return 7% gross with 1.5% in charges should be entered as 5.5%. Use 'available for drawdown' to ring-fence property or any asset the client wants left untouched." }} /></h2><div className="ed-head-tools"><ExpandCtl items={assets} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={assets.length} onConfirm={clearAssets} /><button className="add-btn" onClick={addAsset}><Plus size={15} /> Add</button></div></div>
                 {assets.length === 0 && <p className="empty-note">No assets yet. Add savings, investments, pensions or property — the chart builds from here.</p>}
                 {assets.map((a) => {
                   const expanded = open.has(a.id);
@@ -2572,7 +2572,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "income" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Income</h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={incomes.length} onConfirm={clearIncomes} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Income <SectionHelp content={{ what: "All regular and one-off money coming into the plan — salary, rental income, pensions, dividends, and anything else received in cash. Each income stream has its own start and end dates and escalation rate.", why: "Income is totalled each year and offset against spending. Any surplus is reinvested, left in cash, or treated as spent — whichever you've chosen under Assumptions. When income stops, such as at retirement, the resulting shortfall is funded from savings in drawdown order.", tip: "For a couple, tag each income to its owner — it ceases automatically when that person reaches their end date or dies. State and deferred pensions should start at a future age, not 'now'. Use the gross/net toggle on each income so it's only taxed when a tax jurisdiction is active." }} /></h2><div className="ed-head-tools"><ExpandCtl items={incomes} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={incomes.length} onConfirm={clearIncomes} /><button className="add-btn" onClick={addInc}><Plus size={15} /> Add</button></div></div>
                 {incomes.length === 0 && <p className="empty-note">No income yet. Add salary, rental, dividends or pension income with start and end dates.</p>}
                 {incomes.map((i) => <StreamRow key={i.id} item={i} sym={sym} kind="income" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(i.id)} onToggle={() => openSolo(i.id, incomes)} onChange={(p) => upInc(i.id, p)} onRemove={() => rmInc(i.id)} />)}
                 <p className="ed-hint">End salary at "Retirement" and it tracks each person's retirement age. {couple ? "Set what happens to each income on that person's death." : ""}</p>
@@ -2581,7 +2581,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "expenditure" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Expenditure</h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={expenses.length} onConfirm={clearExpenses} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Expenditure <SectionHelp content={{ what: "Everything money is spent on — living costs, one-off purchases, and recurring outgoings. Mark each item Essential or Discretionary: the split decides what gets flexed when you model a survivor on essentials only, and what the retirement spending smile applies to.", why: "Spending is subtracted from income each year; any gap is funded by drawing from savings. The 'survivor — essentials only' view drops discretionary items entirely, and the spending smile reduces discretionary spending in later life. Essential spending is never reduced by either. Escalation compounds each year, so an inflation-linked cost grows in future-money terms.", tip: "Split essential from lifestyle carefully — it's what makes the survivor and longevity tests meaningful. Enter one-off costs (car, wedding, renovation) as a one-off in the year they fall, not as an annual figure, or they'll repeat every year." }} /></h2><div className="ed-head-tools"><ExpandCtl items={expenses} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={expenses.length} onConfirm={clearExpenses} /><button className="add-btn" onClick={addExp}><Plus size={15} /> Add</button></div></div>
                 {expenses.length === 0 && <p className="empty-note">No spending yet. Add essential and lifestyle costs — the gap between income and spending drives the whole plan.</p>}
                 {expenses.map((e) => <StreamRow key={e.id} item={e} sym={sym} kind="expense" ectx={ectx} inflation={assumptions.inflation} couple={couple} ownerOpts={ownerOpts} expanded={open.has(e.id)} onToggle={() => openSolo(e.id, expenses)} onChange={(p) => upExp(e.id, p)} onRemove={() => rmExp(e.id)} />)}
                 <p className="ed-hint">One-off and "every N years" cover ad-hoc costs. {couple ? "Joint costs step down to the survivor rate after a death; personal costs cease." : ""}</p>
@@ -2631,7 +2631,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "protection" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Protection</h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={protection.length} onConfirm={clearProtection} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Protection <SectionHelp content={{ what: "Life cover and critical-illness policies in force. While a policy is active, its premium is a cost in the plan. When the insured person dies within the term, a life policy's sum assured is paid into the survivor's plan as a lump sum.", why: "Premiums are deducted as spending each year cover is in force. On death within the term, the payout lands in the surviving assets and lifts the survivor's net worth. Critical-illness cover pays on a claim, not on death — model a claim using the CI scenario in Stress test instead.", tip: "Run the Survivor test below to see what gap remains once cover pays out. Check the growth rate on the pot the payout lands in — a lump sum sitting in low-growth cash won't stretch as far as one that's invested." }} /></h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={protection.length} onConfirm={clearProtection} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
                 {protection.length === 0 && <p className="empty-note">No policies yet. Add life cover to model what a lump sum on death would mean for the survivor's plan.</p>}
                 {protection.map((p) => {
                   const expanded = open.has(p.id);
@@ -3209,7 +3209,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           <div className="modal-scrim" onClick={() => setStressOpen(false)}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-head">
-                <div><div className="modal-title">Stress test</div><div className="modal-sub">See how the plan holds up against a shock. The stressed path overlays in red on the chart.</div></div>
+                <div><div className="modal-title">Stress test <SectionHelp content={{ what: "Apply a market shock or adverse scenario to the plan and see what happens. The stressed path overlays in red on the net worth chart so you can compare directly against the base plan.", why: "Historical episodes replay real return sequences shaped on actual crises (2008, dot-com, etc.). Stylised shocks apply a simple permanent or temporary shift to your assumed growth rates. The custom option lets you type any sequence of annual returns. Only one stress can be active at a time.", tip: "The most important stress to show a client is 'bad sequence at retirement' — a crash in the first few years of drawdown is the hardest to recover from because withdrawals lock in the losses. Always show it alongside the base plan, not in isolation." }} /></div><div className="modal-sub">See how the plan holds up against a shock. The stressed path overlays in red on the chart.</div></div>
                 <button className="icon-btn" onClick={() => setStressOpen(false)}><XCircle size={18} /></button>
               </div>
               {(stress || ci) && stressImpact && (
@@ -3317,7 +3317,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             <div className="modal-scrim" onClick={() => setMcOpen(false)}>
               <div className="modal mc-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-head">
-                  <div><div className="modal-title"><Activity size={16} /> Goal confidence</div><div className="modal-sub">The chance of meeting {couple ? `${fn1} & ${fn2}'s` : `${fn1}'s`} goals across {MC_RUNS} randomised market futures, varied around your assumed growth.</div></div>
+                  <div><div className="modal-title"><Activity size={16} /> Goal confidence <SectionHelp content={{ what: "Runs hundreds of randomised market futures — each one varies investment returns year-by-year around your assumed growth rate — and counts how many end with the plan still funded.", why: "The standard projection assumes smooth, identical returns every year. Real markets don't work that way. A bad run early in retirement can permanently damage a plan even if the average return is fine — this is sequence-of-returns risk. The confidence score tells you how often the plan survives that variability.", tip: "A score above 85% is conventionally considered robust. Between 60–85% the plan is viable but sensitive. Below 60%, the plan needs attention — either more assets, lower spending, or a later retirement date. Show the fan chart to the client: the gap between the best and worst lines is the conversation." }} /></div><div className="modal-sub">The chance of meeting {couple ? `${fn1} & ${fn2}'s` : `${fn1}'s`} goals across {MC_RUNS} randomised market futures, varied around your assumed growth.</div></div>
                   <button className="icon-btn" onClick={() => setMcOpen(false)}><XCircle size={18} /></button>
                 </div>
 
@@ -4175,10 +4175,60 @@ function WhatIfSlider({ label, value, min, max, step, fmt, onChange }) {
 
 function InfoTip({ text }) {
   const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
   return (
-    <span className="infotip-wrap">
-      <button type="button" className="infotip-btn" aria-label="More information" aria-expanded={open} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o); }}><HelpCircle size={12.5} /></button>
-      {open && <span className="infotip-inline">{text}</span>}
+    <span className="infotip-wrap" ref={ref}>
+      <button
+        type="button"
+        className="infotip-btn"
+        aria-label="More information"
+        aria-expanded={open}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o); }}
+      ><HelpCircle size={12.5} /></button>
+      {open && (
+        <span className="infotip-pop" role="tooltip" onClick={(e) => e.stopPropagation()}>
+          {text}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/* Section-level help — larger ? button next to section headings.
+   content: { what, why, tip } — each a short string. */
+function SectionHelp({ content }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+  return (
+    <span className="shelp-wrap" ref={ref}>
+      <button
+        type="button"
+        className={`shelp-btn ${open ? "on" : ""}`}
+        aria-label="Section help"
+        aria-expanded={open}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o); }}
+      ><HelpCircle size={14} /></button>
+      {open && (
+        <span className="shelp-pop" role="dialog" onClick={(e) => e.stopPropagation()}>
+          <button className="shelp-close" onClick={() => setOpen(false)} aria-label="Close">×</button>
+          {content.what && <p><strong>What this is</strong><br />{content.what}</p>}
+          {content.why  && <p><strong>How it works</strong><br />{content.why}</p>}
+          {content.tip  && <p className="shelp-tip"><strong>Adviser tip</strong><br />{content.tip}</p>}
+        </span>
+      )}
     </span>
   );
 }
@@ -4629,10 +4679,26 @@ const CSS = `
 .wi-slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid var(--card);box-shadow:0 1px 3px rgba(0,0,0,.25);cursor:pointer;}
 .wi-slider input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--accent);border:2px solid var(--card);cursor:pointer;}
 @media(max-width:560px){.wi-sliders{grid-template-columns:1fr;gap:10px;}}
-.infotip-wrap{display:inline;}
-.infotip-btn{border:none;background:transparent;color:var(--low);cursor:pointer;padding:0 2px;vertical-align:middle;display:inline-flex;align-items:center;outline:none;}
+.infotip-wrap{display:inline;position:relative;}
+.infotip-btn{border:none;background:transparent;color:var(--low);cursor:pointer;padding:0 2px;vertical-align:middle;display:inline-flex;align-items:center;outline:none;transition:color .15s;}
 .infotip-btn:hover,.infotip-btn:focus-visible{color:var(--accent);}
-.infotip-inline{display:block;margin-top:5px;font-size:11px;font-weight:400;color:var(--mid);line-height:1.45;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 9px;text-align:left;}
+.infotip-pop{position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);z-index:120;width:240px;font-size:11.5px;font-weight:400;color:var(--ink);line-height:1.5;background:var(--card);border:1px solid var(--border-strong);border-radius:9px;padding:9px 11px;box-shadow:var(--shadow);pointer-events:auto;text-align:left;white-space:normal;}
+.infotip-pop::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-top-color:var(--card);filter:drop-shadow(0 1px 0 var(--border-strong));}
+/* Section help */
+.shelp-wrap{display:inline-flex;position:relative;vertical-align:middle;}
+.shelp-btn{border:none;background:transparent;color:var(--low);cursor:pointer;padding:0 3px;display:inline-flex;align-items:center;outline:none;transition:color .15s;border-radius:50%;}
+.shelp-btn:hover,.shelp-btn.on{color:var(--accent);}
+.shelp-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.shelp-pop{position:absolute;top:calc(100% + 9px);left:0;z-index:130;width:300px;font-size:12.5px;font-weight:400;color:var(--ink);line-height:1.55;background:var(--card);border:1px solid var(--border-strong);border-radius:12px;padding:15px 16px 13px;box-shadow:var(--shadow);pointer-events:auto;text-align:left;white-space:normal;}
+.shelp-pop p{margin:0 0 11px;font-size:12.5px;color:var(--mid);}
+.shelp-pop p:first-of-type{padding-right:16px;}
+.shelp-pop p:last-child{margin-bottom:0;}
+.shelp-pop strong{font-weight:700;color:var(--ink);display:block;margin-bottom:3px;font-size:11px;letter-spacing:.03em;text-transform:uppercase;}
+.shelp-tip{background:var(--bg);border-radius:8px;padding:9px 11px !important;margin-top:2px;}
+.shelp-tip strong{color:var(--accent) !important;}
+.shelp-close{position:absolute;top:9px;right:11px;border:none;background:transparent;color:var(--low);cursor:pointer;font-size:18px;line-height:1;padding:0;display:flex;align-items:center;justify-content:center;transition:color .15s;}
+.shelp-close:hover{color:var(--ink);}
+@media(max-width:560px){.shelp-pop{width:min(300px,86vw);}}
 .modal-scrim{position:fixed;inset:0;background:rgba(15,20,28,.42);display:flex;align-items:center;justify-content:center;padding:20px;z-index:200;backdrop-filter:blur(2px);}
 /* Report options modal */
 .report-modal{width:min(640px,100%);}
