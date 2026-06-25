@@ -1588,9 +1588,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     } else if (markers.firstDeath) {
       ev.push({ label: "First death", year: markers.firstDeath, color: t.mid });
     }
-    if (kpis.depYear) ev.push({ label: "Funds run short", year: kpis.depYear, color: t.red });
+    const depYr = kpis.s ? kpis.s.depYear : kpis.depYear;
+    if (depYr) ev.push({ label: "Funds run short", year: depYr, color: t.red });
     return ev;
-  }, [markers, kpis.depYear, couple, fn1, fn2, t]);
+  }, [markers, kpis.depYear, kpis.s, couple, fn1, fn2, t]);
 
   // Inflow events — money paid INTO the plan (life cover on death, a CI claim while stress-testing).
   // These explain a step-up in the net-worth line that would otherwise look unexplained.
@@ -2968,7 +2969,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {survivorOverlay
                     ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />
                     : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {kpis.depYear && <ReferenceLine x={kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
+                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
                   {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
                   {showComposition
                     ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
