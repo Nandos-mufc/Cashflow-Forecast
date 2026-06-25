@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback, startTransition } from "react";
 import {
   ComposedChart,
   Area,
@@ -508,8 +508,10 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       if (couple && (o === "client1" || o === "client2") && !ownerAlive(o)) {
         v = i.onDeath && i.onDeath.mode === "continue" ? v * ((Number(i.onDeath.pct) || 0) / 100) : 0;
       }
-      // CI claim: the affected person can no longer earn — stop their salary-like income (ends at retirement) from the claim year
-      if (incomeStop && o === incomeStop.owner && y >= incomeStop.year && i.end && i.end.mode === "retirement") v = 0;
+      // CI claim: the affected person can no longer earn — stop their salary-like income (ends at retirement)
+      // from the claim year. If a resumeYear is given (realistic recovery case) the stop is bounded — income
+      // resumes from that year. With no resumeYear it stops permanently (worst case) — original behaviour.
+      if (incomeStop && o === incomeStop.owner && y >= incomeStop.year && (incomeStop.resumeYear == null || y < incomeStop.resumeYear) && i.end && i.end.mode === "retirement") v = 0;
       incomeBy[i.id] = v;
       incByOwner[bucketOf(o)] += v;
       income += v;
@@ -1098,18 +1100,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // Configuration for the active stress scenario. timing: "now" | "retirement"; lens: "uk" | "global";
   // affects: "growth" (equities/pensions only) | "all"; custom: editable sequence of annual returns.
   const [stressCfg, setStressCfg] = useState({ timing: "now", lens: "global", affects: "growth", custom: [-25, 10, 8] });
-  const upStressCfg = (patch) => setStressCfg((c) => ({ ...c, ...patch }));
+  const upStressCfg = (patch) => startTransition(() => setStressCfg((c) => ({ ...c, ...patch })));
   const [ci, setCi] = useState(null);
-  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000 });
+  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000, mode: "permanent", resumeYears: 3 });
   const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } — mirrors death to chart
   // Stress / critical-illness / survivor are three mutually-exclusive chart overlays. They MUST never be
   // active at once, or the headline label and the projected rows read from different scenarios (e.g. a
   // stale CI label appearing over a lost-decade stress). These helpers are the only sanctioned way to
   // set one — each clears the other two — so the exclusivity can't be forgotten at a call site.
-  const applyStress = (id) => { setStress(id); setCi(null); setSurvivorOverlay(null); };
-  const applyCi = (draft) => { setCi(draft ? { ...draft } : null); setStress(null); setSurvivorOverlay(null); };
-  const applySurvivor = (ov) => { setSurvivorOverlay(ov); setStress(null); setCi(null); };
-  const clearScenario = () => { setStress(null); setCi(null); setSurvivorOverlay(null); };
+  // Each switch triggers a full ~50-year re-projection and repaint of both charts, so the updates are
+  // wrapped in a transition: the click registers immediately and the heavy recompute renders as
+  // interruptible background work (clicking through scenarios no longer blocks the panel). All three
+  // states still commit together in one transition, so the chart never reads a half-applied scenario.
+  const applyStress = (id) => startTransition(() => { setStress(id); setCi(null); setSurvivorOverlay(null); });
+  const applyCi = (draft) => startTransition(() => { setCi(draft ? { ...draft } : null); setStress(null); setSurvivorOverlay(null); });
+  const applySurvivor = (ov) => startTransition(() => { setSurvivorOverlay(ov); setStress(null); setCi(null); });
+  const clearScenario = () => startTransition(() => { setStress(null); setCi(null); setSurvivorOverlay(null); });
   const [annotations, setAnnotations] = useState(seed.annotations || []);
 
   const [profile, setProfile] = useState(seed.profile);
@@ -1226,7 +1232,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   }, [ci, ectx]);
   const stressRows = useMemo(() => {
     const baseArgs = { profile: effProfile, assumptions: effAssumptions, assets: effAssets, incomes, expenses, liabilities, protection, autoInvestSurplus: autoInvest };
-    if (ci) return projectCashflow({ ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear } });
+    if (ci) { const ciResume = ci.mode === "resume" ? ciClaimYear + Math.max(1, Math.round(Number(ci.resumeYears) || 0)) : null; return projectCashflow({ ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear, resumeYear: ciResume } }); }
     if (survivorOverlay) {
       const sovProf = { ...effProfile, [survivorOverlay.owner]: { ...effProfile[survivorOverlay.owner], lifeExpectancy: survivorOverlay.deathAge } };
       // The engine already pays any in-force life cover into the pot in the year of death (see the
@@ -1275,7 +1281,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     // returns across every future, so layering a fixed crash on top would double-count market risk.
     let mcArgs = baseArgs;
     if (ci) {
-      mcArgs = { ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear } };
+      mcArgs = { ...baseArgs, lumpSums: [{ year: ciClaimYear, amount: Number(ci.amount) || 0 }], incomeStop: { owner: ci.owner, year: ciClaimYear, resumeYear: ci.mode === "resume" ? ciClaimYear + Math.max(1, Math.round(Number(ci.resumeYears) || 0)) : null } };
     } else if (survivorOverlay) {
       const sovProf = { ...effProfile, [survivorOverlay.owner]: { ...effProfile[survivorOverlay.owner], lifeExpectancy: survivorOverlay.deathAge } };
       const sovExp = survivorOverlay.essentialOnly ? expenses.filter((e) => (e.priority || "essential") !== "discretionary") : expenses;
@@ -1392,7 +1398,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       if (sc.lensable) bits.push(stressCfg.lens === "global" ? "global equity" : "UK equity");
       scenarioLabel = bits.join(" · ");
     }
-    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}` : scenarioLabel;
+    const label = ci ? `Critical illness claim · ${ci.owner === "client2" ? fn2 : fn1} age ${ci.age}${ci.mode === "resume" ? ` · income back after ${ci.resumeYears}y` : " · income stops for good"}` : survivorOverlay ? `Survivor plan · ${survivorOverlay.owner === "client2" ? fn2 : fn1} dies age ${survivorOverlay.deathAge}${survivorOverlay.essentialOnly ? " · essentials only" : ""}` : scenarioLabel;
     return { label, baseAge: ageOf(rows.find((r) => r.shortfall > 0)), stressAge: ageOf(stressRows.find((r) => r.shortfall > 0)) };
   }, [stressRows, rows, stress, stressCfg, ci, survivorOverlay, fn1, fn2]);
 
@@ -1610,6 +1616,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       ev.push({ label: `Life cover ${fmtFull(Number(p.sumAssured) || 0, cur)}`, year: dr.year, color: t.green });
     });
     if (ci && ciClaimYear != null) ev.push({ label: `CI claim ${fmtFull(Number(ci.amount) || 0, cur)}`, year: baseYear + ciClaimYear, color: t.green });
+    if (ci && ciClaimYear != null && ci.mode === "resume") ev.push({ label: "Income resumes", year: baseYear + ciClaimYear + Math.max(1, Math.round(Number(ci.resumeYears) || 0)), color: t.ink });
     return ev;
   }, [protection, rows, couple, ci, ciClaimYear, baseYear, cur, t]);
 
@@ -2656,7 +2663,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             {section === "protection" && (
               <div className="ed-body">
-                <div className="ed-head"><h2 className="ed-title">Protection <SectionHelp content={{ what: "Life cover and critical-illness policies in force. While a policy is active, its premium is a cost in the plan. When the insured person dies within the term, a life policy's sum assured is paid into the survivor's plan as a lump sum.", why: "Premiums are deducted as spending each year cover is in force. On death within the term, the payout lands in the surviving assets and lifts the survivor's net worth. Critical-illness cover pays on a claim, not on death — model a claim using the CI scenario in Stress test instead.", tip: "Run the Survivor test below to see what gap remains once cover pays out. Check the growth rate on the pot the payout lands in — a lump sum sitting in low-growth cash won't stretch as far as one that's invested." }} /></h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={protection.length} onConfirm={clearProtection} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
+                <div className="ed-head"><h2 className="ed-title">Protection <SectionHelp content={{ what: "Life cover and critical-illness policies in force. While a policy is active, its premium is a cost in the plan. When the insured person dies within the term, a life policy's sum assured is paid into the survivor's plan as a lump sum.", why: "Premiums are deducted as spending each year cover is in force. On death within the term, the payout lands in the surviving assets and lifts the survivor's net worth. Critical-illness cover pays on a claim, not on death — model a claim using the Critical illness claim tester below.", tip: "Run the Survivor test below to see what gap remains once cover pays out. Check the growth rate on the pot the payout lands in — a lump sum sitting in low-growth cash won't stretch as far as one that's invested." }} /></h2><div className="ed-head-tools"><ExpandCtl items={protection} open={open} onExpand={expandAll} onCollapse={collapseAll} /><ClearAll count={protection.length} onConfirm={clearProtection} /><button className="add-btn" onClick={addPol}><Plus size={15} /> Add</button></div></div>
                 {protection.length === 0 && <p className="empty-note">No policies yet. Add life cover to model what a lump sum on death would mean for the survivor's plan.</p>}
                 {protection.map((p) => {
                   const expanded = open.has(p.id);
@@ -2676,9 +2683,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           <label className="flbl">Name</label>
                           <input className="rec-name" value={p.name} onChange={(e) => upPol(p.id, { name: e.target.value })} placeholder="Name" />
                           {couple && <div className="rec-field"><label>Whose life is insured <InfoTip text="Life cover pays out when this person dies. In a couple, the lump sum lands in the survivor's plan." /></label><Pick value={p.insured || "client1"} onChange={(v) => upPol(p.id, { insured: v })} options={ownerOpts.filter((o) => o.value !== "joint")} /></div>}
-                          <div className="rec-field"><label>Policy type <InfoTip text="Life cover pays the sum assured on death — it lands in the survivor's plan. Critical-illness cover pays on diagnosis, not death; model a claim with the CI scenario in Stress test." /></label><Seg value={p.ptype || "life"} onChange={(v) => upPol(p.id, { ptype: v })} options={[{ value: "life", label: "Life" }, { value: "ci", label: "Critical illness" }]} /></div>
+                          <div className="rec-field"><label>Policy type <InfoTip text="Life cover pays the sum assured on death — it lands in the survivor's plan. Critical-illness cover pays on diagnosis, not death; model a claim with the Critical illness claim tester below." /></label><Seg value={p.ptype || "life"} onChange={(v) => upPol(p.id, { ptype: v })} options={[{ value: "life", label: "Life" }, { value: "ci", label: "Critical illness" }]} /></div>
                           <div className="rec-grid">
-                            <div className="rec-field"><label>Sum assured <InfoTip text={(p.ptype || "life") === "ci" ? "The lump sum paid on a critical-illness claim. This is not paid on death — use the CI scenario in Stress test to model a claim." : "The lump sum paid out on death. In a couple it boosts the survivor's assets; for a single client it forms part of the estate."} /></label><Money value={p.sumAssured} symbol={sym} onChange={(v) => upPol(p.id, { sumAssured: v })} /></div>
+                            <div className="rec-field"><label>Sum assured <InfoTip text={(p.ptype || "life") === "ci" ? "The lump sum paid on a critical-illness claim. This is not paid on death — use the Critical illness claim tester below to model a claim." : "The lump sum paid out on death. In a couple it boosts the survivor's assets; for a single client it forms part of the estate."} /></label><Money value={p.sumAssured} symbol={sym} onChange={(v) => upPol(p.id, { sumAssured: v })} /></div>
                             <div className="rec-field"><label>Monthly premium</label><Money value={p.premium} symbol={sym} onChange={(v) => upPol(p.id, { premium: v })} /></div>
                           </div>
                           <div className="rec-field"><label>Cover until age <InfoTip text="Term assurance ends at this age — after it, premiums stop and there's no payout. For whole-of-life cover, set this high (e.g. 120)." /></label><Mini value={p.coverToAge} step={1} suffix={`(${insName || "insured"})`} onChange={(v) => upPol(p.id, { coverToAge: v })} /></div>
@@ -2746,6 +2753,31 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     {!couple && <span className="field-note">The survivor test applies to couples. For a single client, the benchmark above plus liabilities and estate intentions frame the conversation.</span>}
                   </div>
                 )}
+                {/* Critical illness claim — a protection scenario (moved here from Stress test). Re-uses the
+                    same `ci` chart overlay; worst case stops income for good, realistic case resumes it. */}
+                <div className="pg-block">
+                  <div className="ed-head"><h2 className="ed-title">Critical illness claim</h2></div>
+                  <label className="flbl">Model a diagnosis <InfoTip text="Re-runs the plan assuming a serious-illness diagnosis at the age you choose. Any lump sum is paid into the plan that year. 'Stops for good' is the worst case — the affected person's salary-type income never restarts. 'Resumes after' is the realistic case — income pauses while they recover, then comes back after the number of years you set. If they are already retired, only the lump sum applies. To test the impact with no cover in place, set the payout to 0." /></label>
+                  <div className="pg-card">
+                    <div className="ci-text">A lump sum is paid and {couple ? "the affected person's" : "your"} salary-type income stops from that age. If already retired, only the lump sum applies.</div>
+                    <div className="rec-grid">
+                      {couple && <div className="rec-field"><label>Who</label><Pick value={ciDraft.owner} onChange={(v) => setCiDraft((d) => ({ ...d, owner: v }))} options={ownerOpts.filter((o) => o.value !== "joint")} /></div>}
+                      <div className="rec-field"><label>Age at claim</label><Mini value={ciDraft.age} step={1} onChange={(v) => setCiDraft((d) => ({ ...d, age: v }))} /></div>
+                      <div className="rec-field"><label>Lump-sum payout</label><Money value={ciDraft.amount} symbol={sym} onChange={(v) => setCiDraft((d) => ({ ...d, amount: v }))} /></div>
+                    </div>
+                    {(() => { const ciCover = protection.filter((p) => (p.ptype || "life") === "ci" && (p.insured || "client1") === ciDraft.owner && (Number(p.coverToAge) || 0) >= (Number(ciDraft.age) || 0)).reduce((s2, p) => s2 + (Number(p.sumAssured) || 0), 0); return ciCover > 0 && Number(ciDraft.amount) !== ciCover ? <div className="ci-hint">CI cover in force at that age: <b className="num">{fmtFull(ciCover, cur)}</b> <button className="xc-btn" onClick={() => setCiDraft((d) => ({ ...d, amount: ciCover }))}>Use</button></div> : null; })()}
+                    <div className="rec-grid">
+                      <div className="rec-field"><label>Income impact <InfoTip text="Worst case: the affected person never earns their salary-type income again. Realistic: income stops while they recover, then resumes after the number of years you set." /></label><Seg value={ciDraft.mode || "permanent"} onChange={(v) => setCiDraft((d) => ({ ...d, mode: v }))} options={[{ value: "permanent", label: "Stops for good" }, { value: "resume", label: "Resumes after…" }]} /></div>
+                      {(ciDraft.mode || "permanent") === "resume" && <div className="rec-field"><label>Off for (years)</label><Mini value={ciDraft.resumeYears ?? 3} step={1} onChange={(v) => setCiDraft((d) => ({ ...d, resumeYears: Math.max(1, Math.round(Number(v) || 1)) }))} /></div>}
+                    </div>
+                    {(() => {
+                      const ciActive = ci && ci.owner === ciDraft.owner && Number(ci.age) === Number(ciDraft.age) && Number(ci.amount) === Number(ciDraft.amount) && (ci.mode || "permanent") === (ciDraft.mode || "permanent") && ((ciDraft.mode || "permanent") !== "resume" || Number(ci.resumeYears) === Number(ciDraft.resumeYears));
+                      if (ciActive) return <button className="pg-chart-btn pg-chart-btn-on" onClick={() => startTransition(() => setCi(null))}>× Clear from chart</button>;
+                      return <button className="pg-chart-btn" onClick={() => applyCi(ciDraft)}>{ci ? "↗ Update chart" : "↗ Show on chart"}</button>;
+                    })()}
+                  </div>
+                  <span className="field-note">Worst case stops salary-type income permanently from the claim age; the realistic case resumes it after the recovery period. Set the payout to {sym}0 to see the impact with no cover in place. An analysis of this plan, not a recommendation.</span>
+                </div>
               </div>
             )}
             {section === "goals" && (
@@ -3252,7 +3284,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="stress-group-head">{grp.title}<span>{grp.note}</span></div>
                   <div className="goal-cards">
                     {STRESS_SCENARIOS.filter((s) => s.group === grp.key).map((s) => (
-                      <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { setStress(null); } else { applyStress(s.id); } }}>
+                      <button key={s.id} className={`stress-card ${stress === s.id ? "on" : ""}`} onClick={() => { if (stress === s.id) { clearScenario(); } else { applyStress(s.id); } }}>
                         <div className="goal-card-head"><AlertTriangle size={14} /> {s.label}</div>
                         <div className="goal-card-text">{s.short}</div>
                       </button>
@@ -3307,22 +3339,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </div>
                 );
               })()}
-              <div className={`ci-block ${ci ? "on" : ""}`}>
-                <div className="ci-head"><Shield size={14} /> Critical illness claim</div>
-                <div className="ci-text">Model a serious-illness diagnosis: a lump sum is paid and {couple ? "the affected person's" : "your"} salary-type income stops from that age. If already retired, only the lump sum applies. To show the impact of lost income with <b>no cover in place</b>, set the payout to {sym}0.</div>
-                <div className="rec-grid">
-                  {couple && <div className="rec-field"><label>Who</label><Pick value={ciDraft.owner} onChange={(v) => setCiDraft((d) => ({ ...d, owner: v }))} options={ownerOpts.filter((o) => o.value !== "joint")} /></div>}
-                  <div className="rec-field"><label>Age at claim</label><Mini value={ciDraft.age} step={1} onChange={(v) => setCiDraft((d) => ({ ...d, age: v }))} /></div>
-                  <div className="rec-field"><label>Lump-sum payout</label><Money value={ciDraft.amount} symbol={sym} onChange={(v) => setCiDraft((d) => ({ ...d, amount: v }))} /></div>
-                </div>
-                {(() => { const ciCover = protection.filter((p) => (p.ptype || "life") === "ci" && (p.insured || "client1") === ciDraft.owner && (Number(p.coverToAge) || 0) >= (Number(ciDraft.age) || 0)).reduce((s2, p) => s2 + (Number(p.sumAssured) || 0), 0); return ciCover > 0 && Number(ciDraft.amount) !== ciCover ? <div className="ci-hint">CI cover in force at that age: <b className="num">{fmtFull(ciCover, cur)}</b> <button className="xc-btn" onClick={() => setCiDraft((d) => ({ ...d, amount: ciCover }))}>Use</button></div> : null; })()}
-                <div className="ci-actions">
-                  <button className="ci-apply" onClick={() => { applyCi(ciDraft); setStressOpen(false); }}>{ci ? "Update claim overlay" : "Apply claim overlay"}</button>
-                  {ci && <button className="ci-clear" onClick={() => setCi(null)}>Clear</button>}
-                </div>
-              </div>
               <div className="modal-foot">
-                {(stress || ci)
+                {stress
                   ? <div className="stress-foot-actions"><button className="wi-reset" onClick={() => { clearScenario(); setStressOpen(false); }}>Clear stress test</button><button className="goal-btn" onClick={() => setStressOpen(false)}>↗ Show on chart</button></div>
                   : "The base plan is unchanged — this only overlays a comparison line so you can show the client the plan still holds (or where it doesn't)."}
               </div>
