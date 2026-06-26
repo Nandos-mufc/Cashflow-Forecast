@@ -837,7 +837,7 @@ const THEMES = {
     border: "hsl(214 22% 90%)", borderStrong: "hsl(214 20% 82%)",
     ink: "#102A43", mid: "hsl(215 14% 44%)", low: "hsl(215 12% 62%)",
     accent: "#0CA5A5", accentStrong: "#102A43", accentSoft: "hsl(180 54% 95%)",
-    netStroke: "hsl(212 68% 46%)", netFill: "hsl(212 72% 54%)", grid: "hsl(214 22% 92%)",
+    netStroke: "hsl(212 76% 40%)", netFill: "hsl(212 72% 54%)", grid: "hsl(214 22% 92%)",
     green: "hsl(150 56% 38%)", amber: "hsl(28 80% 54%)", red: "hsl(352 70% 50%)",
     line: "hsl(215 32% 17%)", track: "hsl(214 22% 88%)",
     shadow: "0 1px 2px hsl(215 30% 20% / 0.04), 0 8px 24px hsl(215 30% 20% / 0.05)",
@@ -872,8 +872,9 @@ function useRafThrottle(fn) {
 // Number field that stays instantly responsive while typing (local text state)
 // but commits upward only after a short idle, so a value like "300000" triggers
 // one reactive cycle instead of six. Commits immediately on blur or Enter.
-function NumberInput({ value, onCommit, className = "", step = 1, min, commitDelay = 140 }) {
+function NumberInput({ value, onCommit, className = "", step = 1, min, commitDelay = 140, grouped = false }) {
   const [txt, setTxt] = useState(value === "" || value == null ? "" : String(value));
+  const [isFocused, setIsFocused] = useState(false);
   const focused = useRef(false);
   const timer = useRef(null);
   const pending = useRef(null);
@@ -888,6 +889,28 @@ function NumberInput({ value, onCommit, className = "", step = 1, min, commitDel
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
     if (pending.current !== null) { onCommit(pending.current); pending.current = null; }
   };
+  // Grouped (currency) mode: render a text input so we can show thousand separators while the
+  // field is blurred, but edit the plain number while focused — keeps caret/typing behaviour normal.
+  if (grouped) {
+    const display = isFocused
+      ? txt
+      : (txt === "" ? "" : (Number.isFinite(Number(txt)) ? Number(txt).toLocaleString("en-US") : txt));
+    return (
+      <input
+        type="text" inputMode="decimal" className={`num ${className}`} value={display}
+        onFocus={(e) => { focused.current = true; setIsFocused(true); e.target.select(); }}
+        onChange={(e) => {
+          const raw = e.target.value.replace(/[^0-9.\-]/g, "");
+          setTxt(raw);
+          pending.current = raw === "" || raw === "-" ? 0 : Number(raw);
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(() => { timer.current = null; if (pending.current !== null) { onCommit(pending.current); pending.current = null; } }, commitDelay);
+        }}
+        onKeyDown={(e) => { if (e.key === "Enter") flush(); }}
+        onBlur={() => { focused.current = false; setIsFocused(false); flush(); if (txt === "") setTxt("0"); }}
+      />
+    );
+  }
   return (
     <input
       type="number" className={`num ${className}`} value={txt} step={step} min={min}
@@ -905,7 +928,7 @@ function NumberInput({ value, onCommit, className = "", step = 1, min, commitDel
   );
 }
 const Money = ({ value, onChange, symbol }) => (
-  <div className="money"><span className="money-sym">{symbol}</span><NumberInput value={value} step={1000} min={0} className="money-in" onCommit={onChange} /></div>
+  <div className="money"><span className="money-sym">{symbol}</span><NumberInput value={value} step={1000} min={0} className="money-in" grouped onCommit={onChange} /></div>
 );
 // Multiline note input. Keeps keystrokes in local state and only lifts to the (large) report
 // config on pause or blur, so typing never re-renders the whole app — same pattern as NumberInput.
@@ -1016,7 +1039,7 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
   return (
     <div className={`rec ${expanded ? "open" : ""}`}>
       <div className="rec-bar" role="button" tabIndex={0} onClick={onToggle} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}>
-        <span className="rec-name-r">{item.name || "Untitled"}</span>
+        <span className="rec-name-r" title={item.name || "Untitled"}>{item.name || "Untitled"}</span>
         {couple && <span className="owner-chip">{ownerName}</span>}
         {kind === "expense" && <span className={`prio ${item.priority}`}>{item.priority === "essential" ? "Ess" : "Disc"}</span>}
         <span className="rec-sum num">{sym}{(Number(item.amount) || 0).toLocaleString()} <em>{per}</em></span>
@@ -1076,8 +1099,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const sanitiseAssets = (as) => as.map((a) => a.type === "property" && a.drawdown ? { ...a, drawdown: false } : a);
   const THEME_KEY = "meridian_theme";
   const [theme, setTheme] = useState(() => {
-    if (typeof window === "undefined") return "light";
-    try { const tv = localStorage.getItem(THEME_KEY); return tv === "dark" || tv === "light" ? tv : "light"; } catch { return "light"; }
+    if (typeof window === "undefined") return "dark";
+    try { const tv = localStorage.getItem(THEME_KEY); return tv === "dark" || tv === "light" ? tv : "dark"; } catch { return "dark"; }
   });
   const [present, setPresent] = useState(false);
   const [section, setSection] = useState("assets");
@@ -1188,7 +1211,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const baseYear = new Date().getFullYear();
 
   const showReal = present ? true : moneyMode === "real";
-  const showComposition = present ? true : chartView === "composition";
+  const showComposition = chartView === "composition";
 
   const ownerOpts = useMemo(() => [
     { value: "client1", label: fn1 },
@@ -2189,7 +2212,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   const chartMargin = { top: 8, right: 14, left: 2, bottom: 0 };
   const axisWidth = 54;
-  const tick = { fill: t.low, fontSize: 11, fontFamily: "Manrope, sans-serif" };
+  const tick = { fill: t.mid, fontSize: 11, fontWeight: 500, fontFamily: "Manrope, sans-serif" };
   const xInterval = Math.max(0, Math.floor(data.length / 8));
   const agesLabel = (d) => {
     if (!couple) return `Age ${d.c1Age}`;
@@ -2295,9 +2318,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       <style>{CSS}</style>
 
       <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark"><svg viewBox="0 0 48 54" width="20" height="22" fill="none" aria-hidden="true"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="6" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.2" fill="#C8A951" /></svg></div>
-          <div className="brand-text"><span className="brand-name">Meridian</span><span className="brand-tag">{couple ? `${fn1} & ${fn2}` : "International cashflow forecasting"}</span></div>
+        <div className="mbrand">
+          <div className="mbrand-mark"><svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#102A43" /><path d="M16 46 L16 20 L32 40 L48 20 L48 46" fill="none" stroke="#0CA5A5" strokeWidth="6" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="32" cy="15" r="4" fill="#C8A951" /></svg></div>
+          <div className="mbrand-text"><span className="mbrand-name">Meridian</span><span className="mbrand-tag">{couple ? `${fn1} & ${fn2}` : "International cashflow forecasting"}</span></div>
         </div>
         <div className="topbar-tools">
           {!present && (<>
@@ -2463,7 +2486,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         </div>
                         <div className="tax-presets"><span>Preset:</span><button onClick={() => applyPreset(p.id, "none")}>No tax (UAE/Gulf)</button><button onClick={() => applyPreset(p.id, "uk")}>UK 2025/26</button><button onClick={() => applyPreset(p.id, "blank")}>Custom (blank)</button></div>
                         <div className="rec-grid">
-                          <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
+                          <div className="rec-field"><label>Tax-free allowance</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" grouped value={p.personalAllowance} step={500} onCommit={(v) => upPeriod(p.id, { personalAllowance: v })} /></div></div>
                           <div className="rec-field"><label>CGT on investment drawdown <InfoTip text="Capital gains tax applied to money drawn from investment pots while in this jurisdiction (not cash, pensions or offshore bonds). Set 0 for a tax-free jurisdiction like the UAE, or for ISAs. A simplified effective rate you control — it taxes the whole withdrawal, not just the gain." /></label><Mini value={p.cgtRate != null ? p.cgtRate : tax.cgtRate} suffix="%" onChange={(v) => upPeriod(p.id, { cgtRate: Math.min(99, Math.max(0, Number(v) || 0)) })} /></div>
                         </div>
                         <div className="tax-bands">
@@ -2494,8 +2517,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   </div>
                   {est.enabled && (<>
                     <div className="tax-presets"><span>Preset:</span><button onClick={() => setEstate({ nrb: 325000, rnrb: 175000, rate: 40, transferableNrb: true, taperThreshold: 2000000 })}>UK IHT 2025/26</button><button onClick={() => setEstate({ nrb: 0, rnrb: 0, rate: 0, taperThreshold: 0 })}>Clear</button></div>
-                    <div className="field"><label>Tax-free allowance (nil-rate band)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.nrb} step={5000} onCommit={(v) => setEstate({ nrb: v })} /></div><span className="field-note">The amount passing free of tax. The UK nil-rate band is {sym}325,000.</span></div>
-                    <div className="field"><label>Residence allowance (optional)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" value={est.rnrb} step={5000} onCommit={(v) => setEstate({ rnrb: v })} /></div><span className="field-note">UK residence nil-rate band ({sym}175,000) where a main home passes to direct descendants. Leave at 0 if it doesn't apply.</span></div>
+                    <div className="field"><label>Tax-free allowance (nil-rate band)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" grouped value={est.nrb} step={5000} onCommit={(v) => setEstate({ nrb: v })} /></div><span className="field-note">The amount passing free of tax. The UK nil-rate band is {sym}325,000.</span></div>
+                    <div className="field"><label>Residence allowance (optional)</label><div className="money"><span className="money-sym">{sym}</span><NumberInput className="money-in" grouped value={est.rnrb} step={5000} onCommit={(v) => setEstate({ rnrb: v })} /></div><span className="field-note">UK residence nil-rate band ({sym}175,000) where a main home passes to direct descendants. Leave at 0 if it doesn't apply.</span></div>
                     <div className="field"><label>Tax rate above the allowance</label><Mini value={est.rate} suffix="%" onChange={(v) => setEstate({ rate: Math.min(100, Math.max(0, Number(v) || 0)) })} /></div>
                     {couple && <div className="rec-field rec-toggle"><label>Transferable allowance on second death <InfoTip text="On the first death, assets passing to a spouse are normally exempt and that partner's unused allowance transfers. With this on, the survivor's estate carries both partners' allowances (and residence allowances). This models the second death only — the point at which the tax usually falls due." /></label><Toggle on={est.transferableNrb !== false} onClick={() => setEstate({ transferableNrb: !(est.transferableNrb !== false) })} /></div>}
                     {(() => { const ec = computeEstate(kpis.endVal, est, couple); return (
@@ -2524,7 +2547,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <div className={`rec ${expanded ? "open" : ""}`} key={a.id}>
                       <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(a.id, assets)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(a.id, assets); } }}>
                         <span className="swatch" style={{ background: colors[a.id] }} />
-                        <span className="rec-name-r">{a.name || "Untitled"}</span>
+                        <span className="rec-name-r" title={a.name || "Untitled"}>{a.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{ownerName}</span>}
                         <span className="rec-sum num">{sym}{(Number(a.value) || 0).toLocaleString()}</span>
                         <QuickDel onConfirm={() => rmAsset(a.id)} />
@@ -2630,7 +2653,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <div className={`rec ${expanded ? "open" : ""}`} key={L.id}>
                       <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(L.id, liabilities)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(L.id, liabilities); } }}>
                         <span className="swatch" style={{ background: t.red }} />
-                        <span className="rec-name-r">{L.name || "Untitled"}</span>
+                        <span className="rec-name-r" title={L.name || "Untitled"}>{L.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{ownerName}</span>}
                         <span className="rec-sum num">−{sym}{(Number(L.balance) || 0).toLocaleString()}</span>
                         <QuickDel onConfirm={() => rmLiab(L.id)} />
@@ -2672,7 +2695,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     <div className={`rec ${expanded ? "open" : ""}`} key={p.id}>
                       <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(p.id, protection)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(p.id, protection); } }}>
                         <span className="swatch" style={{ background: t.accent }} />
-                        <span className="rec-name-r">{p.name || "Untitled"}</span>
+                        <span className="rec-name-r" title={p.name || "Untitled"}>{p.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{insName}</span>}
                         <span className="rec-sum num">{sym}{(Number(p.sumAssured) || 0).toLocaleString()}</span>
                         <QuickDel onConfirm={() => rmPol(p.id)} />
@@ -2920,6 +2943,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           <div className="chart-card">
             <div className="chart-head">
               <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}{survivorOverlay ? <> · <InfoTip text="The chart shows net worth at the start of each age-year, before that year's cashflows are processed. Death at a given age takes effect in the following year's snapshot — income and contributions stop, cover pays in, and survivor spending adjusts. This means the divergence between the two lines typically appears one to two years after the death age shown." /></> : null}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; const showTax = lifetimeTax > 0 || (compareMap.lifeTax || 0) > 0; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{showTax ? <> · lifetime tax {fmtFull(compareMap.lifeTax || 0, cur)} vs {fmtFull(lifetimeTax, cur)} here</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
+              {present && (
+                <div className="head-toggles">
+                  <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
+                </div>
+              )}
               {!present && (
                 <div className="head-toggles">
                   <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
@@ -3487,7 +3515,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             if (reportCfg.notesOn === false) return null;
             const txt = ((reportCfg.notes || {})[k] || "").trim();
             return (
-              <div className={`rep-notes ${txt ? "filled" : "empty"}`}>
+              <div className={`rep-notes ${txt ? "filled" : "empty rep-notes-print-only"}`}>
                 <div className="rep-notes-label">Notes</div>
                 {txt ? <p className="rep-notes-text">{txt}</p> : null}
               </div>
@@ -4292,11 +4320,12 @@ const CSS = `
 .add-btn:focus-visible,.goal-btn:focus-visible,.wi-reset:focus-visible,.xc-btn:focus-visible,.scen-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--panel);position:sticky;top:0;z-index:30;flex:none;}
-.brand{display:flex;align-items:center;gap:11px;}
-.brand-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--bg);border:1px solid var(--border);}
-.brand-text{display:flex;flex-direction:column;line-height:1.12;}
-.brand-name{font-family:'Manrope',serif;font-weight:600;font-size:19px;letter-spacing:-0.01em;}
-.brand-tag{font-size:11.5px;color:var(--mid);}
+.mbrand{display:flex;align-items:center;gap:11px;}
+.mbrand-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;flex:none;}
+.mbrand-mark svg{display:block;border-radius:9px;}
+.mbrand-text{display:flex;flex-direction:column;line-height:1.12;}
+.mbrand-name{font-family:'Manrope',serif;font-weight:600;font-size:19px;letter-spacing:-0.01em;}
+.mbrand-tag{font-size:11.5px;color:var(--mid);}
 .topbar-tools{display:flex;align-items:center;gap:9px;}
 .cur-sel{background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:7px 9px;font-size:12.5px;cursor:pointer;}
 .icon-btn{background:var(--bg);border:1px solid var(--border);color:var(--mid);border-radius:8px;width:34px;height:34px;display:grid;place-items:center;cursor:pointer;transition:.15s;}
@@ -4594,6 +4623,7 @@ const CSS = `
 .view-seg button{border:none;background:transparent;color:var(--mid);font-family:inherit;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap;}
 .view-seg button.on{background:var(--accent-strong);color:#fff;}
 .legend{display:flex;flex-wrap:wrap;gap:13px;margin:10px 0 2px;font-size:11.5px;color:var(--mid);min-height:14px;}
+@media (max-width:1480px){.legend{gap:10px 11px;font-size:11px;}.legend i.line-key{width:14px;}}
 .legend.sm{gap:11px;font-size:11px;margin:6px 0 2px;}
 .legend span{display:flex;align-items:center;gap:6px;}
 .legend i{width:10px;height:10px;border-radius:3px;}
@@ -4770,6 +4800,7 @@ const CSS = `
 .rep-foot{margin-top:auto;padding-top:14px;font-size:9.5px;color:#9aa3ae;border-top:1px solid #eceff3;text-align:center;}
 .rep-notes{margin-top:20px;border:1px solid #e6e9ee;border-left:3px solid #0CA5A5;border-radius:10px;background:#f5fafa;padding:13px 16px;min-height:128px;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 .rep-notes.empty{background:#f7f9fb;border-left-color:#ccd6da;}
+.rep-notes-print-only{display:none;}
 .rep-notes-label{font-size:11.5px;font-weight:700;letter-spacing:.01em;color:#0a8a8a;margin-bottom:6px;}
 .rep-notes.empty .rep-notes-label{color:#8a96a2;}
 .rep-notes-text{font-size:12.5px;color:#3a424d;line-height:1.55;margin:0;white-space:pre-wrap;}
@@ -4873,6 +4904,7 @@ const CSS = `
   .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
   .report-page.report-last { page-break-after: auto; }
   .rep-table, .rep-kpi, .rep-chart, .rep-verdict, .rep-notes { break-inside: avoid; }
+  .rep-notes-print-only { display: block; }
   .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
   .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
   .rep-rh-doc { font-size: 10px; color: #7a8493; }
