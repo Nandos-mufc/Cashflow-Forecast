@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo, useEffect, useRef, useCallback, startTransition } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback, startTransition, useSyncExternalStore } from "react";
 import {
   ComposedChart,
   Area,
@@ -34,6 +34,10 @@ import {
   AlertTriangle,
   XCircle,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Sparkles,
+  Calendar,
   Target,
   HelpCircle,
   Globe,
@@ -859,6 +863,19 @@ const THEMES = {
 // Coalesces a stream of rapid values (e.g. a slider drag) to at most one
 // commit per animation frame, so the chart tracks the thumb at refresh rate
 // instead of firing a full reactive cycle on every pixel.
+/* Year View hover store — lives OUTSIDE React so moving the mouse across the chart updates a single
+   subscriber (the Year View panel) via useSyncExternalStore, instead of re-rendering the whole app.
+   This is what keeps chart scanning buttery: RunwayApp and the charts never re-render on hover. */
+const yearHoverStore = (() => {
+  let idx = null; const subs = new Set(); let raf = 0;
+  const emit = () => { raf = 0; subs.forEach((f) => f()); };
+  return {
+    get: () => idx,
+    set: (v) => { if (v === idx) return; idx = v; if (!raf) raf = (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame(emit) : setTimeout(emit, 16)); },
+    subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
+  };
+})();
+
 function useRafThrottle(fn) {
   const fnRef = useRef(fn); fnRef.current = fn;
   const pending = useRef(null); const raf = useRef(0);
@@ -1106,6 +1123,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [section, setSection] = useState("assets");
   const [chartView, setChartView] = useState("composition");
   const [moneyMode, setMoneyMode] = useState("real");
+  // Year View — opt-in per-year drill-down. `yearOn` toggles the feature (off = zero overhead, no
+  // hover wiring). Hover lives in an external store (not app state) so scanning never re-renders the
+  // app. `yearPin` is real state — it changes only on click, which is cheap.
+  const [yearOn, setYearOn] = useState(false);
+  const [yearPin, setYearPin] = useState(null);
+  // Story mode — reveal composition layers one at a time for a client meeting (foundation up).
+  const [storyOn, setStoryOn] = useState(false);
+  const [storyStep, setStoryStep] = useState(0);
   const [open, setOpen] = useState(() => new Set());
   const [whatIf, setWhatIf] = useState({ growth: 0, inflation: 0, life: 0 });
   const [goalOpen, setGoalOpen] = useState(false);
@@ -1212,6 +1237,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
 
   const showReal = present ? true : moneyMode === "real";
   const showComposition = chartView === "composition";
+  // Story mode reveals composition layers foundation-up; while active it forces composition view.
+  const storyComposition = storyOn ? true : showComposition;
 
   const ownerOpts = useMemo(() => [
     { value: "client1", label: fn1 },
@@ -1270,6 +1297,22 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const colors = useMemo(() => buildColors(assets), [assets]);
   const incColors = useMemo(() => buildIncomeColors(incomes), [incomes]);
   const stackOrder = useMemo(() => [...assets].sort((a, b) => STACK_RANK[a.type] - STACK_RANK[b.type]), [assets]);
+  // Set of asset ids revealed so far in Story mode (foundation-up through stackOrder). null when off.
+  const storyVisibleIds = useMemo(() => storyOn ? new Set(stackOrder.slice(0, storyStep).map((a) => a.id)) : null, [storyOn, storyStep, stackOrder]);
+  const startStory = useCallback(() => { setStoryOn(true); setStoryStep(0); setChartView("composition"); setYearPin(null); yearHoverStore.set(null); }, []);
+  const exitStory = useCallback(() => { setStoryOn(false); setStoryStep(0); }, []);
+  const stepStory = useCallback((dir) => setStoryStep((s) => Math.max(0, Math.min(stackOrder.length, s + dir))), [stackOrder.length]);
+  // Keyboard control for Story mode so the adviser can advance hands-free while presenting.
+  useEffect(() => {
+    if (!storyOn) return;
+    const onKey = (e) => {
+      if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); stepStory(1); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); stepStory(-1); }
+      else if (e.key === "Escape") { exitStory(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [storyOn, stepStory, exitStory]);
   const tooltipOrder = useMemo(() => [...assets].sort((a, b) => TOOLTIP_RANK[a.type] - TOOLTIP_RANK[b.type]), [assets]);
   const legendTypes = useMemo(() => { const s = []; tooltipOrder.forEach((a) => { if (!s.includes(a.type)) s.push(a.type); }); return s; }, [tooltipOrder]);
   const hasProperty = useMemo(() => assets.some((a) => a.type === "property"), [assets]);
@@ -1390,6 +1433,19 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // True when net worth (or the stressed line) dips below £0 — i.e. debts outlive assets and the
   // plan goes underwater. Drives the red below-zero fill and the £0 baseline on the net worth chart.
   const nwHasNeg = useMemo(() => data.some((d) => d.netWorth < 0 || (d.stressed != null && d.stressed < 0)), [data]);
+
+  // Year View selectors. The pinned index wins; otherwise the live hover index. The panel is open
+  // Hover writes to the external store only (no setState → no app re-render). Click pins via real
+  // state. Handlers attach only when the feature is on, so it's truly free when off.
+  // NB: mouseleave deliberately does NOT clear hover. Once the panel is shown it stays on the last
+  // year (until Close/toggle-off). Collapsing on leave caused a layout-feedback loop — the panel
+  // closing shrank the page, which moved the chart back under the cursor, which reopened it, etc.
+  // Persisting also matches how advisers present: the detail stays put while they talk.
+  const clampIdx = useCallback((i) => Math.max(0, Math.min(data.length - 1, i)), [data.length]);
+  const yearChartHandlers = yearOn ? {
+    onMouseMove: (s) => { if (s && s.activeTooltipIndex != null) yearHoverStore.set(s.activeTooltipIndex); },
+    onClick: (s) => { if (s && s.activeTooltipIndex != null) setYearPin((p) => (p === s.activeTooltipIndex ? null : s.activeTooltipIndex)); },
+  } : undefined;
 
   // Base-only dataset for the printed report's main pages (net worth + money in/out). The on-screen
   // `data` deliberately folds the active stress/death overlay into the money-in-out flow for live
@@ -2221,6 +2277,106 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return `${a} · ${b}`;
   };
 
+  // Year View panel — an isolated component. It subscribes to the external hover store, so when the
+  // adviser scans the chart ONLY this panel re-renders (via useSyncExternalStore) — never RunwayApp
+  // or the charts. Pure presentation over data[idx]; reads the same row the chart draws from, so
+  // figures are accurate by construction and inherit any active stress/CI/survivor overlay.
+  const YearPanel = () => {
+    const hover = useSyncExternalStore(yearHoverStore.subscribe, yearHoverStore.get, () => null);
+    const idx = yearPin != null ? yearPin : hover;
+    const d = data[idx];
+    if (!d) return <div className="yv-wrap open"><div className="yv-hint">Hover the chart to preview a year · click to pin it</div></div>;
+    const prev = idx > 0 ? data[idx - 1] : null;
+    const scenario = d.stressed != null; // crash / CI / survivor active
+    const pinned = yearPin != null;
+    // Money in — per source (scenario-adjusted). Drawdown is shown as a separate line in the card,
+    // matching how FlowTip frames it (income subtotal, then drawdown), so the two never disagree.
+    const srcRows = incomes
+      .map((i) => ({ name: i.name || "Income", v: d[iKey(i.id)] || 0, c: incColors[i.id] }))
+      .filter((r) => r.v >= 1);
+    const drawn = (d.plannedDraw || 0) + (d.coveredBySavings || 0);
+    const totalIn = (d.income || 0) + drawn;
+    // Money out
+    const outRows = [];
+    if ((d.expEssential || 0) >= 1) outRows.push({ name: "Essential spending", v: d.expEssential });
+    if ((d.expDiscretionary || 0) >= 1) outRows.push({ name: "Discretionary spending", v: d.expDiscretionary });
+    if ((d.liabRepay || 0) >= 1) outRows.push({ name: "Loan repayments", v: d.liabRepay });
+    if ((d.premiums || 0) >= 1) outRows.push({ name: "Protection premiums", v: d.premiums });
+    if ((d.contrib || 0) >= 1) outRows.push({ name: "Saved / contributed", v: d.contrib });
+    if ((d.taxPaid || 0) >= 1) outRows.push({ name: "Tax", v: d.taxPaid });
+    const totalOut = (d.expenditure || 0) + (d.contrib || 0) + (d.taxPaid || 0);
+    // Balances — per pot, end of year. Two columns when a scenario is active (base vs scenario).
+    const balRows = tooltipOrder.map((a) => ({
+      name: a.name || TYPE_LABEL[a.type] || "Asset",
+      base: d[aKey(a.id)] || 0,
+      scen: scenario ? (d["s_" + aKey(a.id)] || 0) : null,
+      c: colors[a.id],
+    })).filter((r) => r.base >= 1 || (r.scen || 0) >= 1);
+    const baseNet = d.netWorth, scenNet = scenario ? (d.sTotal - (d.sDebt || 0)) : null;
+    // Verdict — funded / drawing / shortfall, from the same fields the cash-gap strip uses.
+    const uncovered = d.uncovered || 0;
+    let verdict, vClass;
+    if (uncovered >= 1) { verdict = "Shortfall — not fully funded"; vClass = "yv-bad"; }
+    else if (drawn >= 1) { verdict = "Funded by drawing on savings"; vClass = "yv-warn"; }
+    else { verdict = "Income covers spending"; vClass = "yv-good"; }
+    const Card = ({ title, children, foot }) => (
+      <div className="yv-card">
+        <div className="yv-card-h">{title}</div>
+        {children}
+        {foot}
+      </div>
+    );
+    const Row = ({ name, v, c, sub }) => (
+      <div className={`yv-row ${sub ? "yv-sub" : ""}`}><span className="yv-name">{c && <i style={{ background: c }} />}{name}</span><span className="num">{fmtFull(v, cur)}</span></div>
+    );
+    return (
+      <div className="yv-wrap open">
+      <div className="yv-panel">
+        <div className="yv-head">
+          <i className="yv-accent" />
+          <span className="yv-year num">{d.year}</span>
+          <span className="yv-ages">{agesLabel(d)}</span>
+          <span className={`yv-tag ${vClass}`}>{verdict}</span>
+          {scenario && <span className="yv-scn">{survivorOverlay ? "survivor scenario" : ci ? "CI scenario" : "stress scenario"}</span>}
+          <span className="yv-nav">
+            <button aria-label="Previous year" onClick={() => setYearPin(clampIdx(idx - 1))}><ChevronLeft size={15} /></button>
+            <button aria-label="Next year" onClick={() => setYearPin(clampIdx(idx + 1))}><ChevronRight size={15} /></button>
+            <button className="yv-unpin" onClick={() => { setYearPin(null); yearHoverStore.set(null); }}>{pinned ? "Unpin" : "Close"}</button>
+          </span>
+        </div>
+        <div className="yv-cols">
+          <Card title="Money in" foot={<div className="yv-foot"><span>Total money in</span><span className="num">{fmtFull(totalIn, cur)}</span></div>}>
+            {srcRows.length ? srcRows.map((r, i) => <Row key={i} name={r.name} v={r.v} c={r.c} />) : <div className="yv-empty">No earned income this year</div>}
+            {drawn >= 1 && <>
+              <div className="yv-row yv-sub"><span className="yv-name">Income subtotal</span><span className="num">{fmtFull(d.income, cur)}</span></div>
+              <div className="yv-row"><span className="yv-name"><i style={{ background: DRAWDOWN_COLOR }} />Drawn from savings</span><span className="num">{fmtFull(drawn, cur)}</span></div>
+            </>}
+          </Card>
+          <Card title="Money out" foot={<div className="yv-foot"><span>Total out</span><span className="num">{fmtFull(totalOut, cur)}</span></div>}>
+            {outRows.length ? outRows.map((r, i) => <Row key={i} name={r.name} v={r.v} />) : <div className="yv-empty">No spending this year</div>}
+          </Card>
+          <Card
+            title={scenario ? "Balances · end of year (base vs scenario)" : "Balances · end of year"}
+            foot={<div className="yv-foot"><span>Net worth</span>{scenario
+              ? <span className="yv-two"><span className="num yv-muted">{fmtFull(baseNet, cur)}</span><span className="num yv-scenval">{fmtFull(scenNet, cur)}</span></span>
+              : <span className="num" style={{ color: t.netStroke }}>{fmtFull(baseNet, cur)}</span>}</div>}
+          >
+            {balRows.map((r, i) => (
+              <div key={i} className="yv-row"><span className="yv-name"><i style={{ background: r.c }} />{r.name}</span>
+                {scenario
+                  ? <span className="yv-two"><span className="num yv-muted">{fmtFull(r.base, cur)}</span><span className="num yv-scenval">{fmtFull(r.scen, cur)}</span></span>
+                  : <span className="num">{fmtFull(r.base, cur)}</span>}
+              </div>
+            ))}
+          </Card>
+        </div>
+        {prev && <div className="yv-delta">Net worth {baseNet - prev.netWorth >= 0 ? "up" : "down"} {fmtFull(Math.abs(baseNet - prev.netWorth), cur)} on {prev.year}{scenario ? " (base plan)" : ""}.</div>}
+      </div>
+      </div>
+    );
+  };
+
+
   // Tooltips use Recharts' native <Tooltip> with custom content (CompTip/FlowTip). Recharts handles
   // hover detection and positioning internally — this is what keeps chart scanning buttery smooth.
 
@@ -2945,16 +3101,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div><div className="chart-title">Net worth over time</div><div className="chart-sub">to {kpis.endYear} · {cur} · {showReal ? "today's money — what these amounts are worth now" : "future money — the actual amounts paid in each year"}{couple ? " · couple" : ""}{survivorOverlay ? <> · <InfoTip text="The chart shows net worth at the start of each age-year, before that year's cashflows are processed. Death at a given age takes effect in the following year's snapshot — income and contributions stop, cover pays in, and survivor spending adjusts. This means the divergence between the two lines typically appears one to two years after the death age shown." /></> : null}</div>{compareMap && (() => { const last = [...data].reverse().find((d) => d.cmp != null); const delta = last ? last.cmp - last.netWorth : null; const showTax = lifetimeTax > 0 || (compareMap.lifeTax || 0) > 0; return <div className="chart-cmp"><i /> Comparing with <b>{compareName || "scenario"}</b>{delta != null ? <> · at {last.year}: {delta >= 0 ? "+" : "−"}{fmtFull(Math.abs(delta), cur)} {delta >= 0 ? "ahead" : "behind"}</> : null}{showTax ? <> · lifetime tax {fmtFull(compareMap.lifeTax || 0, cur)} vs {fmtFull(lifetimeTax, cur)} here</> : null}{onScenarioAction && <button className="chart-cmp-x" onClick={() => onScenarioAction({ type: "compare", id: null })}>×</button>}</div>; })()}</div>
               {present && (
                 <div className="head-toggles">
-                  <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
+                  <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} disabled={storyOn} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} disabled={storyOn} onClick={() => setChartView("networth")}>Total</button></div>
+                  <button className={`goal-btn year-btn ${yearOn ? "on" : ""}`} onClick={() => { setYearOn((v) => { const n = !v; if (!n) { setYearPin(null); yearHoverStore.set(null); } return n; }); }}><Calendar size={14} /> Year view</button>
+                  <button className={`goal-btn story-btn ${storyOn ? "on" : ""}`} onClick={() => storyOn ? exitStory() : startStory()}><Sparkles size={14} /> {storyOn ? "Exit story" : "Story"}</button>
                 </div>
               )}
               {!present && (
                 <div className="head-toggles">
-                  <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} onClick={() => setChartView("networth")}>Total</button></div>
+                  <div className="view-seg"><button className={chartView === "composition" ? "on" : ""} disabled={storyOn} onClick={() => setChartView("composition")}>Composition</button><button className={chartView === "networth" ? "on" : ""} disabled={storyOn} onClick={() => setChartView("networth")}>Total</button></div>
                   <div className="view-seg"><button className={moneyMode === "real" ? "on" : ""} onClick={() => setMoneyMode("real")}>Today's {sym}</button><button className={moneyMode === "nominal" ? "on" : ""} onClick={() => setMoneyMode("nominal")}>Future {sym}</button></div>
                   <button className="goal-btn" onClick={() => setGoalOpen(true)}><Target size={14} /> What if…</button>
                   <button className={`goal-btn ${stress || ci ? "on" : ""}`} onClick={() => setStressOpen(true)}><AlertTriangle size={14} /> Stress test</button>
                   <button className="goal-btn" onClick={() => setMcOpen(true)}><Activity size={14} /> Confidence</button>
+                  <button className={`goal-btn year-btn ${yearOn ? "on" : ""}`} onClick={() => { setYearOn((v) => { const n = !v; if (!n) { setYearPin(null); yearHoverStore.set(null); } return n; }); }}><Calendar size={14} /> Year view</button>
+                  <button className={`goal-btn story-btn ${storyOn ? "on" : ""}`} onClick={() => storyOn ? exitStory() : startStory()}><Sparkles size={14} /> {storyOn ? "Exit story" : "Story"}</button>
                 </div>
               )}
             </div>
@@ -3015,9 +3175,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </div>
               </div>
             )}
+            {storyOn && (
+              <div className="story-bar">
+                <span className="story-step">{storyStep === 0 ? "Starting point — empty chart" : storyStep >= stackOrder.length ? "Full picture — all assets shown" : `Revealing: ${[...new Set(stackOrder.slice(0, storyStep).map((a) => TYPE_LABEL[a.type]))].join(" + ")}`}</span>
+                <span className="story-dots">{stackOrder.map((a, i) => <i key={a.id} className={i < storyStep ? "on" : ""} style={i < storyStep ? { background: colors[a.id] } : undefined} />)}</span>
+                <span className="story-ctrls">
+                  <button onClick={() => stepStory(-1)} disabled={storyStep === 0}>Back</button>
+                  <button className="story-next" onClick={() => stepStory(1)} disabled={storyStep >= stackOrder.length}>{storyStep >= stackOrder.length ? "Done" : "Reveal next ›"}</button>
+                  <button onClick={() => setStoryStep(0)}>Restart</button>
+                </span>
+              </div>
+            )}
             <div className="chart-main">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={data} margin={chartMargin}>
+                <ComposedChart data={data} margin={chartMargin} {...yearChartHandlers}>
                   <defs><linearGradient id="nwFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={t.netFill} stopOpacity={0.5} /><stop offset="100%" stopColor={t.netFill} stopOpacity={0.04} /></linearGradient></defs>
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <XAxis dataKey="year" tick={false} axisLine={false} tickLine={false} height={4} />
@@ -3031,8 +3202,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                     : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
                   {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
-                  {showComposition
-                    ? stackOrder.map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
+                  {storyComposition
+                    ? stackOrder.filter((a) => !storyVisibleIds || storyVisibleIds.has(a.id)).map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
                   {(stress || ci || survivorOverlay) && <Area type="monotone" dataKey={(d) => Math.max(0, d.stressed || 0)} stackId="sgap" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
                   {(stress || ci || survivorOverlay) && <Area type="monotone" dataKey={(d) => Math.max(0, (d.netWorth || 0) - Math.max(0, d.stressed || 0))} stackId="sgap" stroke="none" fill={t.red} fillOpacity={0.12} isAnimationActive={false} legendType="none" tooltipType="none" />}
@@ -3062,7 +3233,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             </div>
             <div className="chart-cash">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={data} margin={chartMargin}>
+                <ComposedChart data={data} margin={chartMargin} {...yearChartHandlers}>
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <XAxis dataKey="year" tick={tick} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} />
@@ -3079,6 +3250,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
+            {yearOn && <YearPanel />}
           </div>
 
           {/* Cash gap — the plan in three phases, always visible */}
@@ -4621,6 +4793,7 @@ const CSS = `
 .head-toggles{display:flex;gap:8px;flex-wrap:wrap;}
 .view-seg{display:flex;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:3px;gap:2px;}
 .view-seg button{border:none;background:transparent;color:var(--mid);font-family:inherit;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap;}
+.view-seg button:disabled{opacity:0.4;cursor:default;}
 .view-seg button.on{background:var(--accent-strong);color:#fff;}
 .legend{display:flex;flex-wrap:wrap;gap:13px;margin:10px 0 2px;font-size:11.5px;color:var(--mid);min-height:14px;}
 @media (max-width:1480px){.legend{gap:10px 11px;font-size:11px;}.legend i.line-key{width:14px;}}
@@ -4648,6 +4821,9 @@ const CSS = `
 .goal-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--accent);background:transparent;color:var(--accent);font-family:inherit;font-size:11.5px;font-weight:600;padding:6px 11px;border-radius:8px;cursor:pointer;white-space:nowrap;}
 .goal-btn:hover{background:var(--accent-strong);color:#fff;}
 .goal-btn.on{background:var(--red);border-color:var(--red);color:#fff;}
+.goal-btn.story-btn.on{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff;}
+.goal-btn.year-btn.on{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff;}
+.yv-hint{border-top:1px solid var(--border);margin-top:12px;padding-top:13px;font-size:12px;color:var(--low);min-height:300px;}
 .stress-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;padding:8px 12px;border:1px solid var(--red);border-radius:9px;background:color-mix(in srgb, var(--red) 8%, transparent);}
 .stress-bar-surv{border-color:var(--border-strong);background:color-mix(in srgb, var(--ink) 5%, transparent);}
 .stress-bar-surv .stress-tag{color:var(--ink);}
@@ -4914,6 +5090,51 @@ const CSS = `
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
 .cash-title span{font-weight:400;font-size:11px;color:var(--low);}
 .chart-cash{height:clamp(140px,20vh,220px);}
+
+/* Year View — per-year drill-down under the charts. No height animation: the panel is simply present
+   while the feature is on (hint when idle, detail when a year is active). Animating height here would
+   create a moving target for the hover that drives it, which caused a layout-feedback loop. */
+.yv-wrap{overflow:hidden;}
+.yv-wrap.open{}
+.yv-panel{border-top:1px solid var(--border);margin-top:12px;padding-top:13px;min-height:300px;}
+.yv-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+.yv-accent{width:4px;height:16px;border-radius:2px;background:var(--accent);flex:none;}
+.yv-year{font-size:18px;font-weight:600;letter-spacing:-0.01em;}
+.yv-ages{font-size:12.5px;color:var(--mid);}
+.yv-tag{font-size:11px;font-weight:600;border-radius:6px;padding:2px 9px;}
+.yv-tag.yv-good{background:color-mix(in srgb,var(--green) 15%,transparent);color:var(--green);}
+.yv-tag.yv-warn{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber);}
+.yv-tag.yv-bad{background:color-mix(in srgb,var(--red) 15%,transparent);color:var(--red);}
+.yv-scn{font-size:10.5px;font-weight:600;color:var(--mid);border:1px solid var(--border);border-radius:6px;padding:2px 8px;text-transform:lowercase;}
+.yv-nav{margin-left:auto;display:flex;align-items:center;gap:6px;}
+.yv-nav button{display:inline-flex;align-items:center;justify-content:center;height:28px;min-width:28px;padding:0 6px;border:1px solid var(--border);background:var(--card);color:var(--mid);border-radius:8px;cursor:pointer;font-size:11.5px;}
+.yv-nav button:hover{border-color:var(--accent);color:var(--ink);}
+.yv-nav .yv-unpin{padding:0 11px;color:var(--low);}
+.yv-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:11px;}
+.yv-card{background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:11px 13px;}
+.yv-card-h{font-size:10.5px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--mid);margin-bottom:8px;}
+.yv-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12.5px;padding:2.5px 0;}
+.yv-row .yv-name{color:var(--ink);display:inline-flex;align-items:center;}
+.yv-row .yv-name i{width:8px;height:8px;border-radius:2px;margin-right:7px;flex:none;}
+.yv-row.yv-sub .yv-name{color:var(--mid);}
+.yv-empty{font-size:12px;color:var(--low);padding:3px 0;}
+.yv-foot{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12.5px;font-weight:600;margin-top:7px;padding-top:7px;border-top:1px solid var(--border);color:var(--ink);}
+.yv-two{display:inline-flex;gap:12px;align-items:baseline;}
+.yv-two .yv-muted{color:var(--mid);font-weight:500;}
+.yv-two .yv-scenval{color:var(--red);}
+.yv-delta{font-size:11.5px;color:var(--mid);margin-top:10px;}
+
+/* Story mode — reveal control bar above the chart */
+.story-bar{display:flex;align-items:center;gap:13px;flex-wrap:wrap;background:color-mix(in srgb,var(--accent) 8%,var(--card));border:1px solid color-mix(in srgb,var(--accent) 28%,var(--border));border-radius:11px;padding:9px 13px;margin-bottom:11px;}
+.story-step{font-size:12.5px;font-weight:500;color:var(--ink);}
+.story-dots{display:inline-flex;gap:5px;}
+.story-dots i{width:9px;height:9px;border-radius:50%;background:var(--border);transition:background .2s ease;}
+.story-ctrls{margin-left:auto;display:flex;gap:7px;}
+.story-ctrls button{font-size:12px;border:1px solid var(--border);background:var(--card);color:var(--mid);border-radius:8px;padding:5px 12px;cursor:pointer;}
+.story-ctrls button:hover:not(:disabled){border-color:var(--accent);color:var(--ink);}
+.story-ctrls button:disabled{opacity:.4;cursor:default;}
+.story-ctrls .story-next{background:var(--accent-strong);color:#fff;border-color:var(--accent-strong);font-weight:500;}
+@media (max-width:1480px){.yv-cols{grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;}.yv-card{padding:10px 11px;}}
 
 .summary-bar{display:flex;gap:10px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:11px 16px;box-shadow:var(--shadow);}
 .summary-bar div{flex:1;display:flex;flex-direction:column;gap:2px;}
