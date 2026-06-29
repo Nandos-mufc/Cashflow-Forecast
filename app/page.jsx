@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import RouteGuard from "../components/RouteGuard";
 import { useAuth } from "../lib/AuthProvider";
-import { listClients, createClient, renameClient, deleteClient } from "../lib/store";
+import { listClients, createClient, renameClient, deleteClient, duplicateClient } from "../lib/store";
 
 // Health verdict + label, derived from the plan summary the engine wrote. Mirrors RunwayApp's
 // kpis.tone so the dashboard and the in-plan banner always agree. Null when no summary yet.
@@ -135,6 +135,21 @@ function Dashboard() {
 
   function openDelete(c, e) { e.stopPropagation(); setMenuId(null); setModal({ type: "delete", client: c }); }
 
+  async function runDuplicate(c, e) {
+    e.stopPropagation();
+    setMenuId(null);
+    setBusy(true);
+    try {
+      const copy = await duplicateClient(c.id, `${c.display_name} (copy)`);
+      await refresh();
+      router.push(`/plan/${copy.id}`);
+    } catch (err) {
+      setErr(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function confirmDelete() {
     if (busy || !modal?.client) return;
     setBusy(true);
@@ -176,6 +191,10 @@ function Dashboard() {
       <button onClick={(e) => startRename(c, e)}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
         Rename
+      </button>
+      <button onClick={(e) => runDuplicate(c, e)} disabled={busy}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Duplicate
       </button>
       <button className="del" onClick={(e) => openDelete(c, e)}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /></svg>
@@ -388,6 +407,9 @@ function Dashboard() {
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                         <button className="dz-iconbtn" onClick={(e) => startRename(c, e)} aria-label="Rename" title="Rename" style={{ marginRight: 6 }}>
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                        </button>
+                        <button className="dz-iconbtn" onClick={(e) => runDuplicate(c, e)} aria-label="Duplicate" title="Duplicate" style={{ marginRight: 6 }} disabled={busy}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         </button>
                         <button className="dz-iconbtn del" onClick={(e) => openDelete(c, e)} aria-label="Delete" title="Delete">
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /></svg>
