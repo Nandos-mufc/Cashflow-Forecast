@@ -2060,6 +2060,37 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     return paras.join("\n\n");
   }, [reportOpen, reportCfg.anonymous, rows, kpis, reportCashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur, showReal, stressActive, stressImpact, lifetimeTax]);
   const commentaryText = commentaryEdit ?? generatedCommentary;
+  // Structured strengths/watch for the report's coloured commentary blocks. Mirrors the logic in
+  // generatedCommentary above — keep the two in sync. Empty unless the report is open.
+  const commentaryStruct = useMemo(() => {
+    if (!reportOpen) return { strengths: [], watch: [] };
+    const m = (v) => fmtFull(v, cur);
+    const anon = reportCfg.anonymous;
+    const n1 = anon ? "Client 1" : fn1, n2 = anon ? "Client 2" : fn2;
+    const y0 = rows[0] || {};
+    const surplus0 = (y0.income || 0) - (y0.expenditure || 0);
+    const strengths = [];
+    if (kpis.depletionAge === null) strengths.push("the plan remains funded across the full time horizon, including the survivor period");
+    if (surplus0 > 0) strengths.push(`a current annual surplus of about ${m(surplus0)} while working`);
+    if (hasContrib) strengths.push("regular contributions are being made to savings or pensions");
+    const types = new Set(assets.map((a) => a.type));
+    if (types.size >= 3) strengths.push("assets are spread across several classes (" + [...types].map((t2) => TYPE_LABEL[t2].toLowerCase()).join(", ") + ")");
+    if (protection.length) strengths.push("life cover is in force");
+    if (kpis.depletionAge === null && kpis.endVal > 0) strengths.push(`a projected estate of ${m(kpis.endVal)} at the end of the plan`);
+    const watch = [];
+    if (kpis.depletionAge !== null) watch.push(`assets are projected to deplete at age ${kpis.depletionAge} (${kpis.depYear})`);
+    const gross = assets.reduce((s, a) => s + (Number(a.value) || 0), 0);
+    const propVal = assets.filter((a) => a.type === "property").reduce((s, a) => s + (Number(a.value) || 0), 0);
+    if (gross > 0 && propVal / gross > 0.5) watch.push(`over half of total assets (${Math.round((propVal / gross) * 100)}%) is held in property, which the plan treats as non-spendable`);
+    if (!protection.length && (couple || liabilities.length > 0)) watch.push("no life cover is currently recorded" + (liabilities.length ? " while liabilities are outstanding" : ""));
+    if (couple && protSnap && protSnap.firstDeath && protSnap.firstDeath.payout === 0 && protection.length) watch.push(`the cover recorded does not extend to the first death in ${protSnap.firstDeath.year} (terms end earlier)`);
+    if (protGap) protGap.bench.forEach((b) => { const nm = b.k === "client2" ? n2 : n1; if (b.inc > 0 && b.lifeGap > 0) watch.push(`life cover for ${nm} is ${m(b.lifeGap)} below the ${protMult.life}× income benchmark`); if (b.inc > 0 && b.ciGap > 0 && b.ciHave === 0) watch.push(`no critical-illness cover is recorded for ${nm} (benchmark ${m(b.ciNeed)})`); });
+    if (protGap && protGap.survivor) protGap.survivor.forEach((sv) => { const nm = sv.k === "client2" ? n2 : n1; if (!sv.funded && sv.closeGap != null) watch.push(`if ${nm} died at age ${sv.dAge}, the survivor's plan runs short - additional cover of ${sv.closeGap === Infinity ? "over " + m(20000000) : "~" + m(Math.ceil(sv.closeGap / 10000) * 10000)} would close the gap`); });
+    if (reportCashGap && !reportCashGap.none && reportCashGap.uncoveredCount > 0) watch.push(`${reportCashGap.uncoveredCount} year${reportCashGap.uncoveredCount === 1 ? "" : "s"} show spending that cannot be met from income or savings, starting ${reportCashGap.firstUncoveredYear}`);
+    const incOwners = new Set(incomes.filter((i) => (Number(i.amount) || 0) > 0).map((i) => i.owner || "client1"));
+    if (couple && incOwners.size === 1 && incomes.length > 0) watch.push(`all recorded income belongs to ${incOwners.has("client2") ? n2 : n1}`);
+    return { strengths, watch };
+  }, [reportOpen, reportCfg.anonymous, rows, kpis, reportCashGap, protSnap, protGap, protMult, assets, incomes, liabilities, protection, hasContrib, couple, fn1, fn2, cur]);
 
   // What-if goal solver. Synchronous and memoised: it only runs when the panel or report is open
   // (the gate below), computes in one pass, and the panel opens instantly with answers - the smooth,
@@ -4019,27 +4050,31 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
               <div className="report-sheet">
 
                 {/* Cover + verdict */}
-                <section className="report-page">
-                  <div className="rep-cover">
-                    <div className="rep-cover-brand"><svg viewBox="0 0 48 54" width="26" height="29" fill="none" aria-hidden="true"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="6" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.2" fill="#C8A951" /></svg><span className="rep-cover-word">Meridian</span><span className="rep-cover-kicker">Cashflow plan</span></div>
-                    <h1 className="rep-h1">{clientName}</h1>
-                    <div className="rep-meta">Prepared {reportDate}{reportCfg.adviser ? ` by ${reportCfg.adviser}` : ""}{reportCfg.firm ? `, ${reportCfg.firm}` : ""} · Figures in {basis} · Currency {cur}</div>
+                <section className="report-page rep-coverpage">
+                  <div className="rep-cv">
+                    <div className="rep-cv-head">
+                      <span className="rep-cv-brand"><svg viewBox="0 0 48 54" width="30" height="34" fill="none" aria-hidden="true"><path d="M5 48 L5 12 L24 35 L43 12 L43 48" stroke="#0CA5A5" strokeWidth="6" strokeLinecap="butt" strokeLinejoin="miter" /><circle cx="24" cy="6" r="3.2" fill="#C8A951" /></svg><span className="rep-cv-word">Meridian</span></span>
+                      <span className="rep-cv-kicker">Cashflow forecast</span>
+                    </div>
+                    <div className="rep-cv-mid">
+                      <span className="rep-cv-accent"><i className="rep-cv-dot" /><i className="rep-cv-rule" /></span>
+                      <div className="rep-cv-label">Personal cashflow plan</div>
+                      <h1 className="rep-cv-name">{clientName}</h1>
+                      <div className="rep-cv-sub">Prepared on {reportDate} · Figures in {basis} · {cur}</div>
+                    </div>
+                    <svg className="rep-cv-motif" viewBox="0 0 600 160" preserveAspectRatio="none" aria-hidden="true"><path d="M0 150 L70 120 L140 132 L210 92 L280 104 L350 60 L420 72 L490 34 L560 22 L600 8" fill="none" stroke="#0CA5A5" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" /></svg>
+                    <div className="rep-cv-panel">
+                      <div className="rep-cv-people">
+                        <div className="rep-cv-pers"><span>{dfn1}</span><b>{anon ? `Age ${ectx.age0c1}` : `Born ${c1.dob}`} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</b></div>
+                        {couple && <div className="rep-cv-pers"><span>{dfn2}</span><b>{anon ? `Age ${ectx.age0c2}` : `Born ${c2.dob}`} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</b></div>}
+                      </div>
+                      <div className="rep-cv-meta">
+                        {reportCfg.adviser ? <div className="rep-cv-meta-row"><span>Adviser</span><b>{reportCfg.adviser}</b></div> : null}
+                        {reportCfg.firm ? <div className="rep-cv-meta-row"><span>Firm</span><b>{reportCfg.firm}</b></div> : null}
+                        <div className="rep-cv-meta-row"><span>Date</span><b>{reportDate}</b></div>
+                      </div>
+                    </div>
                   </div>
-                  <div className={`rep-verdict rep-${banner.tone}`}>
-                    <div className="rep-verdict-tag">{kpis.depletionAge === null ? "Fully funded" : kpis.tone === "red" ? "At risk" : "Caution"}</div>
-                    <div className="rep-verdict-text">{verdictText}</div>
-                  </div>
-                  <div className="rep-kpis">
-                    <div className="rep-kpi"><span>Net worth today</span><b className="num">{m(kpis.currentTotal)}</b></div>
-                    <div className="rep-kpi"><span>At retirement</span><b className="num">{m(kpis.atRetirement)}</b></div>
-                    <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className={`num ${kpis.endVal > 0 ? "rep-pos" : "rep-neg"}`}>{m(kpis.endVal)}</b></div>
-                    <div className="rep-kpi"><span>Plan longevity</span><b className={`num ${kpis.depletionAge === null ? "rep-pos" : kpis.tone === "red" ? "rep-neg" : "rep-warn"}`}>{longevity}</b></div>
-                  </div>
-                  <div className="rep-people">
-                    <div className="rep-person"><b>{dfn1}</b><span>{anon ? `Age ${ectx.age0c1}` : `Born ${c1.dob}`} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
-                    {couple && <div className="rep-person"><b>{dfn2}</b><span>{anon ? `Age ${ectx.age0c2}` : `Born ${c2.dob}`} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</span></div>}
-                  </div>
-                  <RepFoot />
                 </section>
 
                 {/* Executive summary */}
@@ -4047,7 +4082,16 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <section className="report-page">
                   <RepHead />
                     <h2 className="rep-h2">Executive summary</h2>
-                    <p className="rep-p rep-lede">{verdictText}</p>
+                    <div className={`rep-verdict rep-${banner.tone}`}>
+                      <div className="rep-verdict-tag">{kpis.depletionAge === null ? "Fully funded" : kpis.tone === "red" ? "At risk" : "Caution"}</div>
+                      <div className="rep-verdict-text">{verdictText}</div>
+                    </div>
+                    <div className="rep-kpis">
+                      <div className="rep-kpi"><span>Net worth today</span><b className="num">{m(kpis.currentTotal)}</b></div>
+                      <div className="rep-kpi"><span>At retirement</span><b className="num">{m(kpis.atRetirement)}</b></div>
+                      <div className="rep-kpi"><span>End of plan ({kpis.endYear})</span><b className={`num ${kpis.endVal > 0 ? "rep-pos" : "rep-neg"}`}>{m(kpis.endVal)}</b></div>
+                      <div className="rep-kpi"><span>Plan longevity</span><b className={`num ${kpis.depletionAge === null ? "rep-pos" : kpis.tone === "red" ? "rep-neg" : "rep-warn"}`}>{longevity}</b></div>
+                    </div>
                     <div className="rep-exec-grid">
                       <div className="rep-exec-item"><span>Annual income today</span><b className="num">{m(inc0)}</b></div>
                       <div className="rep-exec-item"><span>Annual spending today</span><b className="num">{m(exp0)}</b></div>
@@ -4057,7 +4101,11 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                       {reportCashGap && reportCashGap.none && <div className="rep-exec-item"><span>Draw on savings</span><b className="num">None - income covers spending throughout</b></div>}
                       <div className="rep-exec-item"><span>Projected estate ({kpis.endYear})</span><b className="num">{m(kpis.endVal)}</b></div>
                     </div>
-                    <p className="rep-p">This summary describes the projection under the stated assumptions. It is not a recommendation; figures will differ if actual returns, inflation, income or spending differ from those assumptions.</p>
+                    <div className="rep-people">
+                      <div className="rep-person"><b>{dfn1}</b><span>{anon ? `Age ${ectx.age0c1}` : `Born ${c1.dob}`} · Retires {c1.retirementAge} · Plan to {c1.lifeExpectancy}</span></div>
+                      {couple && <div className="rep-person"><b>{dfn2}</b><span>{anon ? `Age ${ectx.age0c2}` : `Born ${c2.dob}`} · Retires {c2.retirementAge} · Plan to {c2.lifeExpectancy}</span></div>}
+                    </div>
+                    <p className="rep-p" style={{ marginTop: 18 }}>This summary describes the projection under the stated assumptions. It is not a recommendation; figures will differ if actual returns, inflation, income or spending differ from those assumptions.</p>
                     {stressActive && <p className="rep-p rep-small">A stress scenario is currently active. The figures on this page describe the base plan; the projection charts and the stress test page reflect the scenario.</p>}
                     <RepFoot />
                   </section>
@@ -4582,7 +4630,29 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <section className="report-page">
                   <RepHead />
                     <h2 className="rep-h2">Commentary</h2>
-                    {commentaryText.split(/\n\n+/).map((para, i) => <p className="rep-p" key={i}>{para}</p>)}
+                    {commentaryEdit !== null
+                      ? commentaryText.split(/\n\n+/).map((para, i) => <p className="rep-p" key={i}>{para}</p>)
+                      : (<>
+                        {commentaryText.split(/\n\n+/).filter((p) => !/^(Strengths:|Watch points:)/.test(p)).map((para, i) => <p className="rep-p" key={i}>{para}</p>)}
+                        {commentaryStruct.strengths.length > 0 && (
+                          <div className="rep-comm rep-comm-green">
+                            <div className="rep-comm-h">Strengths</div>
+                            <ul className="rep-comm-list">{commentaryStruct.strengths.map((s, i) => <li key={i}>{s}</li>)}</ul>
+                          </div>
+                        )}
+                        {commentaryStruct.watch.length > 0 && (
+                          <div className={`rep-comm ${kpis.depletionAge !== null ? "rep-comm-red" : "rep-comm-amber"}`}>
+                            <div className="rep-comm-h">{kpis.depletionAge !== null ? "Risks to address" : "Points to discuss"}</div>
+                            <ul className="rep-comm-list">{commentaryStruct.watch.map((s, i) => <li key={i}>{s}</li>)}</ul>
+                          </div>
+                        )}
+                      </>)}
+                    {adviserNotes && adviserNotes.trim() && (
+                      <div className="rep-comm rep-comm-notes">
+                        <div className="rep-comm-h">Adviser notes</div>
+                        <p className="rep-comm-notes-text">{adviserNotes}</p>
+                      </div>
+                    )}
                     <RepFoot />
                   </section>
                 )}
@@ -5438,6 +5508,43 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .rep-empty{color:#9aa3b0;font-style:italic;}
 .rep-notes{margin:0;padding-left:18px;font-size:12.5px;color:#2a3038;line-height:1.7;}
 .rep-disc{font-size:11px;color:#7a8493;line-height:1.55;margin:0 0 10px;}
+/* --- Premium report cover page (Session 5) --- */
+.rep-coverpage{margin:-46px -52px 34px;padding:0;border-bottom:none;background:#102A43;color:#fff;border-radius:6px 6px 0 0;overflow:hidden;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+.rep-cv{position:relative;min-height:940px;display:flex;flex-direction:column;padding:58px 56px 0;box-sizing:border-box;}
+.rep-cv-head{display:flex;align-items:center;justify-content:space-between;gap:16px;}
+.rep-cv-brand{display:flex;align-items:center;gap:11px;}
+.rep-cv-word{font-weight:700;font-size:23px;letter-spacing:-.02em;color:#fff;}
+.rep-cv-kicker{font-size:10.5px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.5);}
+.rep-cv-mid{margin-top:auto;margin-bottom:auto;padding:48px 0;position:relative;z-index:1;}
+.rep-cv-accent{display:flex;align-items:center;gap:9px;margin-bottom:20px;}
+.rep-cv-dot{width:7px;height:7px;border-radius:50%;background:#C8A951;display:inline-block;}
+.rep-cv-rule{width:48px;height:2px;background:#0CA5A5;display:inline-block;border-radius:2px;}
+.rep-cv-label{font-size:12.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#0CA5A5;margin-bottom:14px;}
+.rep-cv-name{font-family:"Manrope",ui-sans-serif,sans-serif;font-size:46px;line-height:1.07;font-weight:600;letter-spacing:-.02em;color:#fff;margin:0;}
+.rep-cv-sub{margin-top:17px;font-size:13px;color:rgba(255,255,255,.62);}
+.rep-cv-motif{position:absolute;left:0;right:0;bottom:182px;width:100%;height:150px;opacity:.15;z-index:0;}
+.rep-cv-panel{margin:0 -56px;padding:26px 56px 30px;background:#0a1c30;border-top:1px solid rgba(255,255,255,.09);display:flex;justify-content:space-between;gap:30px;flex-wrap:wrap;position:relative;z-index:1;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+.rep-cv-people{display:flex;flex-direction:column;gap:13px;}
+.rep-cv-pers span{display:block;font-size:14.5px;font-weight:600;color:#fff;}
+.rep-cv-pers b{font-weight:400;font-size:11.5px;color:rgba(255,255,255,.55);}
+.rep-cv-meta{display:flex;flex-direction:column;gap:0;min-width:220px;}
+.rep-cv-meta-row{display:flex;justify-content:space-between;align-items:center;gap:18px;font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.09);padding:7px 0;}
+.rep-cv-meta-row span{color:rgba(255,255,255,.5);letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;font-weight:600;}
+.rep-cv-meta-row b{color:#fff;font-weight:600;}
+/* --- Commentary blocks --- */
+.rep-comm{border-radius:11px;padding:14px 17px;margin:0 0 13px;border:1px solid;-webkit-print-color-adjust:exact;print-color-adjust:exact;break-inside:avoid;}
+.rep-comm-h{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;}
+.rep-comm-list{margin:0;padding-left:18px;}
+.rep-comm-list li{font-size:12.5px;line-height:1.55;color:#2a3038;margin-bottom:5px;}
+.rep-comm-list li::first-letter{text-transform:uppercase;}
+.rep-comm-green{background:#eef8f1;border-color:#cbe8d6;}.rep-comm-green .rep-comm-h{color:#1f8a5b;}
+.rep-comm-amber{background:#fdf5e6;border-color:#f0dcae;}.rep-comm-amber .rep-comm-h{color:#b9831a;}
+.rep-comm-red{background:#fbecec;border-color:#f1c4c4;}.rep-comm-red .rep-comm-h{color:#c0392b;}
+.rep-comm-notes{background:#f5fafa;border-color:#cfe6e6;border-left:3px solid #0CA5A5;}.rep-comm-notes .rep-comm-h{color:#0a8a8a;}
+.rep-comm-notes-text{font-size:12.5px;color:#3a424d;line-height:1.6;margin:0;white-space:pre-wrap;}
+/* KPI premium hairline */
+.rep-kpi{position:relative;overflow:hidden;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+.rep-kpi::before{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,#0CA5A5,#C8A951);}
 .rep-runhead{display:none;}
 @media print {
   body * { visibility: hidden; }
@@ -5453,6 +5560,10 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
   .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
   .rep-rh-doc { font-size: 10px; color: #7a8493; }
   @page { size: A4; margin: 16mm; }
+  @page :first { margin: 0; }
+  .rep-coverpage { margin: 0; border-radius: 0; min-height: auto; }
+  .rep-coverpage .rep-cv { min-height: 100vh; padding: 24mm 22mm 0; }
+  .rep-coverpage .rep-cv-panel { margin: 0 -22mm; padding: 22px 22mm 26px; }
 }
 .cash-head{margin-top:12px;border-top:1px solid var(--border);padding-top:11px;}
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
