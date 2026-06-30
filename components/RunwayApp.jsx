@@ -1127,6 +1127,24 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
 /* ================================================================== */
 /*  APP                                                               */
 /* ================================================================== */
+function RefLineLabel({ viewBox, value, color }) {
+  if (!viewBox || value == null) return null;
+  const { x, y } = viewBox;
+  const h = 18;
+  const pad = 8;
+  const w = Math.max(44, value.length * 5.6 + pad * 2);
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <rect x={x - w / 2} y={y - h - 7} width={w} height={h} rx={5}
+        fill="#0b1e30" stroke={color} strokeWidth={1.2} opacity={0.97} />
+      <text x={x} y={y - h - 7 + h * 0.7} textAnchor="middle"
+        fill={color} fontSize={9.5} fontFamily="Manrope, sans-serif" fontWeight={600}>
+        {value}
+      </text>
+    </g>
+  );
+}
+
 function XAgeTick({ x, y, payload, data, couple, fn1, fn2 }) {
   if (!payload || payload.value == null) return null;
   const row = data.find((d) => d.year === payload.value);
@@ -2333,6 +2351,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const addExp = () => addOpen(setExpenses, { id: uid(), name: "New expense", amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "essential", owner: "joint" }, expenses);
 
   const chartMargin = { top: 8, right: 14, left: 2, bottom: 0 };
+  const nwChartMargin = { top: 32, right: 14, left: 2, bottom: 0 };
   const axisWidth = 54;
   const tick = { fill: t.mid, fontSize: 11, fontWeight: 500, fontFamily: "Manrope, sans-serif" };
   const xInterval = Math.max(0, Math.floor(data.length / 8));
@@ -3273,20 +3292,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             <div className="chart-main">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={data} margin={chartMargin} {...yearChartHandlers}>
+                <ComposedChart data={data} margin={nwChartMargin} {...yearChartHandlers}>
                   <defs><linearGradient id="nwFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={t.netFill} stopOpacity={0.5} /><stop offset="100%" stopColor={t.netFill} stopOpacity={0.04} /></linearGradient></defs>
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <XAxis dataKey="year" tick={<XAgeTick data={data} couple={couple} fn1={fn1} fn2={fn2} />} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} height={38} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} position={{ y: 10 }} />
 
-                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value={couple && markers.retC2 === markers.retC1 ? "Both retire" : `${fn1} retires`} color={t.ink} />} />}
+                  {markers.retC2 && markers.retC2 !== markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value={`${fn2} retires`} color={t.ink} />} />}
                   {survivorOverlay
-                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />
-                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
-                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
+                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} label={<RefLineLabel value="Death" color={t.red} />} />
+                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value="1st death" color={t.mid} />} />}
+                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} label={<RefLineLabel value="Runs short" color={t.red} />} />}
+                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} label={<RefLineLabel value="Cover pays" color={t.green} />} />)}
                   {storyComposition
                     ? stackOrder.filter((a) => !storyVisibleIds || storyVisibleIds.has(a.id)).map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
