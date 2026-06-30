@@ -25,6 +25,7 @@ import {
   Layers,
   FileText,
   Plus,
+  Minus,
   Trash2,
   Maximize2,
   Minimize2,
@@ -980,9 +981,23 @@ function RangeInput({ value, min, max, step = 1, onChange, ...rest }) {
   const throttled = useRafThrottle(onChange);
   return <input type="range" min={min} max={max} step={step} value={local} onChange={(e) => { const v = Number(e.target.value); setLocal(v); throttled(v); }} {...rest} />;
 }
-const Mini = ({ value, onChange, suffix, step = 1 }) => (
-  <div className="mininum"><NumberInput value={value} step={step} onCommit={onChange} />{suffix && <span>{suffix}</span>}</div>
-);
+const Mini = ({ value, onChange, suffix, step = 1, min, max }) => {
+  const bump = (dir) => {
+    const cur = Number(value) || 0;
+    let next = Number((cur + dir * step).toFixed(6));
+    if (min != null) next = Math.max(min, next);
+    if (max != null) next = Math.min(max, next);
+    if (next !== cur) onChange(next);
+  };
+  return (
+    <div className="mininum has-step">
+      <button type="button" className="mini-step" tabIndex={-1} aria-label="Decrease" onMouseDown={(e) => e.preventDefault()} onClick={() => bump(-1)}><Minus size={13} /></button>
+      <NumberInput value={value} step={step} onCommit={onChange} />
+      {suffix && <span className="mini-suffix">{suffix}</span>}
+      <button type="button" className="mini-step" tabIndex={-1} aria-label="Increase" onMouseDown={(e) => e.preventDefault()} onClick={() => bump(1)}><Plus size={13} /></button>
+    </div>
+  );
+};
 const Pick = ({ value, onChange, options }) => (
   <select className="pick" value={value} onChange={(e) => onChange(e.target.value)}>{options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
 );
@@ -1122,6 +1137,23 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     try { const tv = localStorage.getItem(THEME_KEY); return tv === "dark" || tv === "light" ? tv : "dark"; } catch { return "dark"; }
   });
   const [present, setPresent] = useState(false);
+  // Editor collapse as a 4-phase machine so the motion is a pure GPU transform (buttery) while the
+  // chart reflows exactly once - never per-frame. open -> closing -> closed -> opening -> open.
+  const [edPhase, setEdPhase] = useState("open");
+  const edTokenRef = useRef(0);
+  const edTimerRef = useRef(null);
+  useEffect(() => () => { if (edTimerRef.current) clearTimeout(edTimerRef.current); }, []);
+  const toggleEditor = useCallback(() => {
+    setEdPhase((cur) => {
+      const token = ++edTokenRef.current;
+      const goingClosed = cur === "open" || cur === "opening";
+      const rest = goingClosed ? "closed" : "open";
+      if (edTimerRef.current) clearTimeout(edTimerRef.current);
+      edTimerRef.current = setTimeout(() => { if (edTokenRef.current === token) setEdPhase(rest); }, 340);
+      return goingClosed ? "closing" : "opening";
+    });
+  }, []);
+  const edCollapsed = edPhase === "closing" || edPhase === "closed";
   const [section, setSection] = useState("assets");
   const [chartView, setChartView] = useState("composition");
   const [moneyMode, setMoneyMode] = useState("real");
@@ -2490,7 +2522,15 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         </div>
       </header>
 
-      <div className={`app ${present ? "present" : ""}`}>
+      <div className={`app ${present ? "present" : ""} ${present ? "" : "ed-" + edPhase}`}>
+        {!present && (
+          <button
+            className="ed-handle"
+            onClick={toggleEditor}
+            aria-label={edCollapsed ? "Show inputs" : "Hide inputs"}
+            title={edCollapsed ? "Show inputs" : "Hide inputs"}
+          >{edCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button>
+        )}
         {!present && (
           <nav className="rail">
             <div className="rail-group">{NAV.map((n) => <button key={n.id} className={`rail-item ${section === n.id ? "active" : ""}`} onClick={() => setSection(n.id)}><n.Icon size={17} /><span className="rail-label">{n.label}</span></button>)}</div>
@@ -4519,13 +4559,47 @@ function InfoTip({ text }) {
    content: { what, why, tip } - each a short string. */
 function SectionHelp({ content }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
   const ref = useRef(null);
+  const popRef = useRef(null);
+
   useEffect(() => {
     if (!open) return;
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => {
+      if (ref.current && ref.current.contains(e.target)) return;
+      if (popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const compute = () => {
+      const btn = ref.current && ref.current.getBoundingClientRect();
+      const pop = popRef.current && popRef.current.getBoundingClientRect();
+      if (!btn || !pop) return;
+      const margin = 12, gap = 9;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let left = btn.left;
+      left = Math.max(margin, Math.min(left, vw - margin - pop.width));
+      let top = btn.bottom + gap;
+      if (top + pop.height > vh - margin) {
+        const above = btn.top - gap - pop.height;
+        top = above >= margin ? above : Math.max(margin, vh - margin - pop.height);
+      }
+      setPos({ top, left });
+    };
+    compute();
+    window.addEventListener("scroll", compute, true);
+    window.addEventListener("resize", compute);
+    return () => {
+      window.removeEventListener("scroll", compute, true);
+      window.removeEventListener("resize", compute);
+    };
+  }, [open]);
+
   return (
     <span className="shelp-wrap" ref={ref}>
       <button
@@ -4533,10 +4607,16 @@ function SectionHelp({ content }) {
         className={`shelp-btn ${open ? "on" : ""}`}
         aria-label="Section help"
         aria-expanded={open}
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o); }}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((o) => !o); setPos(null); }}
       ><HelpCircle size={14} /></button>
       {open && (
-        <span className="shelp-pop" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <span
+          className="shelp-pop"
+          role="dialog"
+          ref={popRef}
+          style={pos ? { top: pos.top, left: pos.left, opacity: 1 } : { top: -9999, left: -9999, opacity: 0 }}
+          onClick={(e) => e.stopPropagation()}
+        >
           <button className="shelp-close" onClick={() => setOpen(false)} aria-label="Close">×</button>
           {content.what && <p><strong>What this is</strong><br />{content.what}</p>}
           {content.why  && <p><strong>How it works</strong><br />{content.why}</p>}
@@ -4554,6 +4634,8 @@ const CSS = `
 .app-root{font-family:'Manrope',ui-sans-serif,sans-serif;background:var(--bg);color:var(--ink);min-height:100%;width:100%;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
 .app-root *{box-sizing:border-box;}
 .num{font-family:'Manrope',ui-sans-serif,sans-serif;font-variant-numeric:tabular-nums;}
+input.num[type=number]{-moz-appearance:textfield;}
+input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
 /* Micro-interactions - shared press/hover feel across every action control */
 .add-btn,.goal-btn,.wi-reset,.xc-btn,.scen-btn,.pg-chart-btn,.report-btn,.add-band,.scen-del,.rec-del,.del-row,.tax-presets button{transition:transform .1s ease,border-color .15s ease,color .15s ease,background .15s ease,box-shadow .15s ease;}
 .add-btn:active,.goal-btn:active,.wi-reset:active,.xc-btn:active,.scen-btn:active,.pg-chart-btn:active,.report-btn:active,.add-band:active,.tax-presets button:active{transform:scale(.97);}
@@ -4576,7 +4658,21 @@ const CSS = `
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent-strong);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{display:grid;grid-template-columns:204px 360px 1fr;align-items:start;}
+.app{--rail-w:204px;--ed-w:360px;display:grid;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;align-items:start;position:relative;}
+/* Collapsed layouts (chart full width). The grid changes ONCE per toggle - never animated -
+   so the chart reflows a single time. The visible motion is the editor's GPU transform only. */
+.app.ed-closing,.app.ed-closed,.app.ed-opening{grid-template-columns:var(--rail-w) 0px 1fr;}
+/* During motion the editor is an absolute overlay (height:auto = content height, matching its
+   in-flow box exactly, so the static<->absolute switch is seamless). */
+.app.ed-closing .editor,.app.ed-closed .editor,.app.ed-opening .editor{position:fixed;left:var(--rail-w);top:0;width:var(--ed-w);height:100vh;overflow-y:auto;z-index:5;}
+.app.ed-closing .editor,.app.ed-closed .editor{transform:translateX(-100%);opacity:0;pointer-events:none;}
+.app.ed-opening .editor{transform:translateX(0);opacity:1;}
+/* Single divider handle: rides the editor/chart boundary, vertically centred, fixed so it's always
+   reachable and never collides with section content. Slides in sync with the panel. */
+.ed-handle{position:fixed;top:50%;left:var(--rail-w);transform:translate(calc(var(--ed-w) - 50%),-50%);z-index:40;width:26px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;box-shadow:0 2px 10px rgba(16,42,67,.12);transition:transform .32s cubic-bezier(.22,1,.36,1),color .12s ease,border-color .12s ease,background .12s ease;}
+.ed-handle:hover{color:var(--accent);border-color:var(--accent);}
+.app.ed-closing .ed-handle,.app.ed-closed .ed-handle{transform:translate(-50%,-50%);}
+@media (max-width:920px){.ed-handle{display:none;}}
 .app.present{grid-template-columns:1fr;}
 
 .rail{background:var(--rail);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;}
@@ -4594,7 +4690,7 @@ const CSS = `
 .tab{display:flex;align-items:center;gap:6px;white-space:nowrap;background:var(--bg);border:1px solid var(--border);color:var(--mid);padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:500;font-family:inherit;cursor:pointer;}
 .tab.active{background:var(--accent-strong);color:#fff;border-color:var(--accent-strong);}
 
-.editor{border-right:1px solid var(--border);background:var(--panel);overflow:visible;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
+.editor{border-right:1px solid var(--border);background:var(--panel);overflow:hidden;transition:transform .32s cubic-bezier(.22,1,.36,1),opacity .26s ease;will-change:transform;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
 .editor::-webkit-scrollbar,.rail::-webkit-scrollbar,.chartwrap::-webkit-scrollbar,.modal::-webkit-scrollbar,.notes-area::-webkit-scrollbar{width:8px;height:8px;}
 .editor::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb,.chartwrap::-webkit-scrollbar-thumb,.modal::-webkit-scrollbar-thumb,.notes-area::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box;}
 .editor::-webkit-scrollbar-thumb:hover{background:var(--low);border:2px solid transparent;background-clip:content-box;}
@@ -4735,7 +4831,7 @@ const CSS = `
 .tax-bands-head{display:grid;grid-template-columns:1fr 1fr 28px;gap:8px;font-size:10.5px;color:var(--low);text-transform:uppercase;letter-spacing:.04em;font-weight:600;}
 .tax-band{display:grid;grid-template-columns:1fr 1fr 28px;gap:8px;align-items:center;}
 .tax-band-empty{font-size:11.5px;color:var(--low);font-style:italic;}
-.money.sm,.mininum.sm{height:34px;}
+.money.sm,.mininum.sm{height:34px;min-height:34px;}
 .money.sm .money-in{font-size:12.5px;}
 .add-band{align-self:flex-start;display:inline-flex;align-items:center;gap:4px;background:transparent;border:1px dashed var(--border);color:var(--mid);font-family:inherit;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;}
 .add-band:hover{border-color:var(--accent);color:var(--accent);}
@@ -4816,12 +4912,20 @@ const CSS = `
 .rec-field{display:flex;flex-direction:column;gap:5px;min-width:0;}
 .rec-field label{font-size:11px;color:var(--low);font-weight:500;}
 .inl-note{font-size:10.5px;color:var(--low);font-style:italic;}
-.pick{background:var(--panel);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:8px 9px;font-size:12.5px;font-family:inherit;cursor:pointer;width:100%;}
-.money,.mininum{display:flex;align-items:center;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+.pick{background:var(--panel);border:1px solid var(--border);color:var(--ink);border-radius:8px;padding:9px 10px;font-size:12.5px;font-family:inherit;cursor:pointer;width:100%;min-height:38px;}
+.money,.mininum{display:flex;align-items:center;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden;min-height:38px;}
 .money-sym{padding:0 7px;font-size:11px;color:var(--low);}
-.money-in{flex:1;background:transparent;border:none;color:var(--ink);padding:8px 9px 8px 0;font-size:12.5px;width:100%;min-width:0;}
-.mininum input{flex:1;background:transparent;border:none;color:var(--ink);padding:8px 9px;font-size:12.5px;width:100%;min-width:0;}
+.money-in{flex:1;background:transparent;border:none;color:var(--ink);padding:8px 9px 8px 0;font-size:12.5px;width:100%;min-width:0;text-overflow:ellipsis;}
+.mininum input{flex:1;background:transparent;border:none;color:var(--ink);padding:8px 9px;font-size:12.5px;width:100%;min-width:0;text-overflow:ellipsis;}
 .mininum span{padding:0 9px 0 0;font-size:11px;color:var(--low);}
+.mininum.has-step{overflow:hidden;}
+.mininum.has-step input{text-align:center;padding:8px 2px;}
+.mininum.has-step .mini-suffix{padding:0 2px 0 0;font-size:11px;color:var(--low);}
+.mini-step{flex:none;width:30px;align-self:stretch;border:none;background:transparent;color:var(--low);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background .12s ease,color .12s ease;-webkit-tap-highlight-color:transparent;}
+.mini-step:first-child{border-right:1px solid var(--border);}
+.mini-step:last-child{border-left:1px solid var(--border);}
+.mini-step:hover{background:color-mix(in srgb, var(--accent) 12%, transparent);color:var(--accent);}
+.mini-step:active{background:color-mix(in srgb, var(--accent) 22%, transparent);}
 .anchor{display:flex;gap:6px;align-items:center;}
 .anchor .pick{flex:1;}
 .anchor-age{width:50px;background:var(--panel);border:1px solid var(--border);border-radius:8px;color:var(--ink);font-size:12.5px;padding:8px 5px;text-align:center;}
@@ -5015,7 +5119,7 @@ const CSS = `
 .shelp-btn{border:none;background:transparent;color:var(--low);cursor:pointer;padding:0 3px;display:inline-flex;align-items:center;outline:none;transition:color .15s;border-radius:50%;}
 .shelp-btn:hover,.shelp-btn.on{color:var(--accent);}
 .shelp-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
-.shelp-pop{position:absolute;top:calc(100% + 9px);left:0;z-index:130;width:300px;font-size:12.5px;font-weight:400;color:var(--ink);line-height:1.55;background:var(--card);border:1px solid var(--border-strong);border-radius:12px;padding:15px 16px 13px;box-shadow:var(--shadow);pointer-events:auto;text-align:left;white-space:normal;}
+.shelp-pop{position:fixed;z-index:9999;width:300px;font-size:12.5px;font-weight:400;color:var(--ink);line-height:1.55;background:var(--card);border:1px solid var(--border-strong);border-radius:12px;padding:15px 16px 13px;box-shadow:var(--shadow);pointer-events:auto;text-align:left;white-space:normal;}
 .shelp-pop p{margin:0 0 11px;font-size:12.5px;color:var(--mid);}
 .shelp-pop p:first-of-type{padding-right:16px;}
 .shelp-pop p:last-child{margin-bottom:0;}
@@ -5234,7 +5338,8 @@ const CSS = `
 .tip-name{display:flex;align-items:center;gap:7px;} .tip-name i{width:9px;height:9px;border-radius:3px;flex:none;}
 
 @media (max-width:1180px){
-  .app{grid-template-columns:64px 348px 1fr;}
+  .app{--rail-w:64px;--ed-w:348px;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;}
+  .app.ed-closing,.app.ed-closed,.app.ed-opening{grid-template-columns:var(--rail-w) 0px 1fr;}
   .rail{padding:16px 8px;align-items:center;}
   .rail-item{justify-content:center;padding:11px 0;}
   .rail-label,.soon-pill{display:none;}
@@ -5243,7 +5348,8 @@ const CSS = `
   .app{display:flex;flex-direction:column;}
   .rail{display:none;}
   .tabbar{display:flex;}
-  .editor{border-right:none;border-bottom:1px solid var(--border);max-height:360px;}
+  .editor{border-right:none;border-bottom:1px solid var(--border);max-height:360px;overflow-y:auto;}
+  .app .editor{position:static;transform:none;opacity:1;}
   .chartwrap{order:-1;}
   .stats{grid-template-columns:repeat(2,1fr);}
 }
