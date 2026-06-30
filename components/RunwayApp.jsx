@@ -1139,21 +1139,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [present, setPresent] = useState(false);
   // Editor collapse as a 4-phase machine so the motion is a pure GPU transform (buttery) while the
   // chart reflows exactly once - never per-frame. open -> closing -> closed -> opening -> open.
-  const [edPhase, setEdPhase] = useState("open");
-  const edTokenRef = useRef(0);
-  const edTimerRef = useRef(null);
-  useEffect(() => () => { if (edTimerRef.current) clearTimeout(edTimerRef.current); }, []);
-  const toggleEditor = useCallback(() => {
-    setEdPhase((cur) => {
-      const token = ++edTokenRef.current;
-      const goingClosed = cur === "open" || cur === "opening";
-      const rest = goingClosed ? "closed" : "open";
-      if (edTimerRef.current) clearTimeout(edTimerRef.current);
-      edTimerRef.current = setTimeout(() => { if (edTokenRef.current === token) setEdPhase(rest); }, 340);
-      return goingClosed ? "closing" : "opening";
-    });
-  }, []);
-  const edCollapsed = edPhase === "closing" || edPhase === "closed";
+  const [edCollapsed, setEdCollapsed] = useState(false);
+  const toggleEditor = useCallback(() => setEdCollapsed(v => !v), []);
   const [section, setSection] = useState("assets");
   const [chartView, setChartView] = useState("composition");
   const [moneyMode, setMoneyMode] = useState("real");
@@ -2522,7 +2509,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         </div>
       </header>
 
-      <div className={`app ${present ? "present" : ""} ${present ? "" : "ed-" + edPhase}`}>
+      <div className={`app ${present ? "present" : ""} ${!present && edCollapsed ? "ed-collapsed" : ""}`}>
         {!present && (
           <button
             className="ed-handle"
@@ -4658,20 +4645,12 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent-strong);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{--rail-w:204px;--ed-w:360px;display:grid;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;align-items:start;position:relative;}
-/* Collapsed layouts (chart full width). The grid changes ONCE per toggle - never animated -
-   so the chart reflows a single time. The visible motion is the editor's GPU transform only. */
-.app.ed-closing,.app.ed-closed,.app.ed-opening{grid-template-columns:var(--rail-w) 0px 1fr;}
-/* During motion the editor is an absolute overlay (height:auto = content height, matching its
-   in-flow box exactly, so the static<->absolute switch is seamless). */
-.app.ed-closing .editor,.app.ed-closed .editor,.app.ed-opening .editor{position:fixed;left:var(--rail-w);top:0;width:var(--ed-w);height:100vh;overflow-y:auto;z-index:5;}
-.app.ed-closing .editor,.app.ed-closed .editor{transform:translateX(-100%);opacity:0;pointer-events:none;}
-.app.ed-opening .editor{transform:translateX(0);opacity:1;}
-/* Single divider handle: rides the editor/chart boundary, vertically centred, fixed so it's always
-   reachable and never collides with section content. Slides in sync with the panel. */
-.ed-handle{position:fixed;top:50%;left:var(--rail-w);transform:translate(calc(var(--ed-w) - 50%),-50%);z-index:40;width:26px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;box-shadow:0 2px 10px rgba(16,42,67,.12);transition:transform .32s cubic-bezier(.22,1,.36,1),color .12s ease,border-color .12s ease,background .12s ease;}
+.app{--rail-w:204px;--ed-w:360px;display:grid;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;align-items:start;position:relative;transition:grid-template-columns .38s cubic-bezier(.4,0,.2,1);}
+.app.ed-collapsed{grid-template-columns:var(--rail-w) 0px 1fr;}
+/* Handle: fixed to viewport, transforms in sync with the grid via same easing + duration */
+.ed-handle{position:fixed;top:50%;left:var(--rail-w);transform:translate(calc(var(--ed-w) - 50%),-50%);z-index:40;width:26px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;box-shadow:0 2px 10px rgba(16,42,67,.12);transition:transform .38s cubic-bezier(.4,0,.2,1),color .12s ease,border-color .12s ease;}
 .ed-handle:hover{color:var(--accent);border-color:var(--accent);}
-.app.ed-closing .ed-handle,.app.ed-closed .ed-handle{transform:translate(-50%,-50%);}
+.app.ed-collapsed .ed-handle{transform:translate(-50%,-50%);}
 @media (max-width:920px){.ed-handle{display:none;}}
 .app.present{grid-template-columns:1fr;}
 
@@ -4690,14 +4669,14 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .tab{display:flex;align-items:center;gap:6px;white-space:nowrap;background:var(--bg);border:1px solid var(--border);color:var(--mid);padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:500;font-family:inherit;cursor:pointer;}
 .tab.active{background:var(--accent-strong);color:#fff;border-color:var(--accent-strong);}
 
-.editor{border-right:1px solid var(--border);background:var(--panel);overflow:hidden;transition:transform .32s cubic-bezier(.22,1,.36,1),opacity .26s ease;will-change:transform;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
+.editor{border-right:1px solid var(--border);background:var(--panel);overflow:hidden;min-width:0;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
 .editor::-webkit-scrollbar,.rail::-webkit-scrollbar,.chartwrap::-webkit-scrollbar,.modal::-webkit-scrollbar,.notes-area::-webkit-scrollbar{width:8px;height:8px;}
 .editor::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb,.chartwrap::-webkit-scrollbar-thumb,.modal::-webkit-scrollbar-thumb,.notes-area::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box;}
 .editor::-webkit-scrollbar-thumb:hover{background:var(--low);border:2px solid transparent;background-clip:content-box;}
 .editor::-webkit-scrollbar-track,.rail::-webkit-scrollbar-track,.chartwrap::-webkit-scrollbar-track,.modal::-webkit-scrollbar-track,.notes-area::-webkit-scrollbar-track{background:transparent;}
 .rail{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
 .chartwrap{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;}
-.ed-body{padding:18px 16px;display:flex;flex-direction:column;gap:13px;}
+.ed-body{padding:18px 16px;display:flex;flex-direction:column;gap:13px;min-width:var(--ed-w);}
 .ed-head{display:flex;align-items:center;justify-content:space-between;}
 .ed-body > .ed-head:first-child{position:sticky;top:0;z-index:6;background:var(--panel);margin:-18px -16px 8px;padding:16px 16px 10px;border-bottom:1px solid var(--border);}
 .ed-head-tools{display:flex;align-items:center;gap:8px;}
@@ -5339,7 +5318,7 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 
 @media (max-width:1180px){
   .app{--rail-w:64px;--ed-w:348px;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;}
-  .app.ed-closing,.app.ed-closed,.app.ed-opening{grid-template-columns:var(--rail-w) 0px 1fr;}
+  .app.ed-collapsed{grid-template-columns:var(--rail-w) 0px 1fr;}
   .rail{padding:16px 8px;align-items:center;}
   .rail-item{justify-content:center;padding:11px 0;}
   .rail-label,.soon-pill{display:none;}
