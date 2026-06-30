@@ -1137,10 +1137,67 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
     try { const tv = localStorage.getItem(THEME_KEY); return tv === "dark" || tv === "light" ? tv : "dark"; } catch { return "dark"; }
   });
   const [present, setPresent] = useState(false);
-  // Editor collapse as a 4-phase machine so the motion is a pure GPU transform (buttery) while the
-  // chart reflows exactly once - never per-frame. open -> closing -> closed -> opening -> open.
-  const [edCollapsed, setEdCollapsed] = useState(false);
-  const toggleEditor = useCallback(() => setEdCollapsed(v => !v), []);
+  // True 4-phase machine: open -> closing -> closed -> opening -> open.
+  // grid-template-columns NEVER transitions (per-frame layout reflow = jank).
+  // Only transform animates (GPU compositor, zero layout cost).
+  // One layout reflow fires at each phase boundary, never per frame.
+  const [edPhase, setEdPhase] = useState('open');
+  const edCollapsed = edPhase === 'closed';
+  const editorRef = useRef(null);
+  const chartwrapRef = useRef(null);
+  const toggleEditor = useCallback(() => {
+    setEdPhase(p => (p === 'open' ? 'closing' : p === 'closed' ? 'opening' : p));
+  }, []);
+  useLayoutEffect(() => {
+    const ed = editorRef.current;
+    const cw = chartwrapRef.current;
+    if (!ed || !cw || edPhase !== 'opening') return;
+    ed.style.transition = 'none';
+    cw.style.transition = 'none';
+    ed.style.transform = 'translateX(-100%)';
+    cw.style.transform = 'translateX(calc(-1 * var(--ed-w)))';
+  }, [edPhase]);
+  useEffect(() => {
+    const ed = editorRef.current;
+    const cw = chartwrapRef.current;
+    if (!ed || !cw) return;
+    const EASE = 'transform 220ms cubic-bezier(.4,0,.2,1)';
+    const reset = () => {
+      ed.style.transform = '';
+      ed.style.transition = '';
+      ed.style.willChange = '';
+      cw.style.transform = '';
+      cw.style.transition = '';
+      cw.style.willChange = '';
+    };
+    if (edPhase === 'closing') {
+      ed.style.willChange = 'transform';
+      cw.style.willChange = 'transform';
+      ed.style.transition = EASE;
+      cw.style.transition = EASE;
+      void ed.offsetHeight;
+      ed.style.transform = 'translateX(-100%)';
+      cw.style.transform = 'translateX(calc(-1 * var(--ed-w)))';
+      const onEnd = () => setEdPhase('closed');
+      ed.addEventListener('transitionend', onEnd, { once: true });
+      return () => ed.removeEventListener('transitionend', onEnd);
+    }
+    if (edPhase === 'closed') { reset(); }
+    if (edPhase === 'opening') {
+      ed.style.willChange = 'transform';
+      cw.style.willChange = 'transform';
+      const raf = requestAnimationFrame(() => requestAnimationFrame(() => {
+        ed.style.transition = EASE;
+        cw.style.transition = EASE;
+        ed.style.transform = '';
+        cw.style.transform = '';
+        const onEnd = () => setEdPhase('open');
+        ed.addEventListener('transitionend', onEnd, { once: true });
+      }));
+      return () => cancelAnimationFrame(raf);
+    }
+    if (edPhase === 'open') { reset(); }
+  }, [edPhase]);
   const [section, setSection] = useState("assets");
   const [chartView, setChartView] = useState("composition");
   const [moneyMode, setMoneyMode] = useState("real");
@@ -2509,7 +2566,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         </div>
       </header>
 
-      <div className={`app ${present ? "present" : ""} ${!present && edCollapsed ? "ed-collapsed" : ""}`}>
+      <div className={`app ${present ? "present" : ""} ${!present ? `ed-phase-${edPhase}` : ""}`}>
         {!present && (
           <button
             className="ed-handle"
@@ -2528,7 +2585,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         {!present && <div className="tabbar">{NAV.map((n) => <button key={n.id} className={`tab ${section === n.id ? "active" : ""}`} onClick={() => setSection(n.id)}><n.Icon size={15} /> {n.label}</button>)}</div>}
 
         {!present && (
-          <section className="editor">
+          <section className="editor" ref={editorRef}>
             {section === "client" && (
               <div className="ed-body">
                 <h2 className="ed-title">{couple ? "Clients" : "Client"}</h2>
@@ -3115,7 +3172,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           </section>
         )}
 
-        <main className="chartwrap">
+        <main className="chartwrap" ref={chartwrapRef}>
           <div className="stats">
             <Stat label="Net worth today" value={fmtCompact(kpis.currentTotal, cur)} sub={couple ? `${fn1} ${ectx.age0c1} (${baseYear}) · ${fn2} ${ectx.age0c2} (${baseYear})` : `age ${ectx.age0c1} (${baseYear})`} />
             <Stat label={kpis.s ? "At retirement · scenario" : "At retirement"} value={fmtCompact(kpis.s ? kpis.s.atRetirement : kpis.atRetirement, cur)} sub={kpis.s ? <StatDelta scen={kpis.s.atRetirement} base={kpis.atRetirement} cur={cur} /> : (ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`)} tone={kpis.s && kpis.s.atRetirement < kpis.atRetirement ? "red" : undefined} />
@@ -4645,12 +4702,12 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .btn-primary{display:flex;align-items:center;gap:7px;background:var(--accent-strong);color:#fff;border:none;border-radius:8px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;}
 .btn-primary:hover{filter:brightness(1.08);}
 
-.app{--rail-w:204px;--ed-w:360px;display:grid;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;align-items:start;position:relative;transition:grid-template-columns .38s cubic-bezier(.4,0,.2,1);}
-.app.ed-collapsed{grid-template-columns:var(--rail-w) 0px 1fr;}
+.app{--rail-w:204px;--ed-w:360px;display:grid;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;align-items:start;position:relative;}
+.app.ed-phase-closed{grid-template-columns:var(--rail-w) 0px 1fr;}
 /* Handle: fixed to viewport, transforms in sync with the grid via same easing + duration */
-.ed-handle{position:fixed;top:50%;left:var(--rail-w);transform:translate(calc(var(--ed-w) - 50%),-50%);z-index:40;width:26px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;box-shadow:0 2px 10px rgba(16,42,67,.12);transition:transform .38s cubic-bezier(.4,0,.2,1),color .12s ease,border-color .12s ease;}
+.ed-handle{position:fixed;top:50%;left:var(--rail-w);transform:translate(calc(var(--ed-w) - 50%),-50%);z-index:40;width:26px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);background:var(--card);color:var(--low);border-radius:8px;cursor:pointer;box-shadow:0 2px 10px rgba(16,42,67,.12);transition:transform 220ms cubic-bezier(.4,0,.2,1),color .12s ease,border-color .12s ease;}
 .ed-handle:hover{color:var(--accent);border-color:var(--accent);}
-.app.ed-collapsed .ed-handle{transform:translate(-50%,-50%);}
+.app.ed-phase-closing .ed-handle,.app.ed-phase-closed .ed-handle{transform:translate(-50%,-50%);}
 @media (max-width:920px){.ed-handle{display:none;}}
 .app.present{grid-template-columns:1fr;}
 
@@ -5318,7 +5375,7 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 
 @media (max-width:1180px){
   .app{--rail-w:64px;--ed-w:348px;grid-template-columns:var(--rail-w) var(--ed-w) 1fr;}
-  .app.ed-collapsed{grid-template-columns:var(--rail-w) 0px 1fr;}
+  .app.ed-phase-closed{grid-template-columns:var(--rail-w) 0px 1fr;}
   .rail{padding:16px 8px;align-items:center;}
   .rail-item{justify-content:center;padding:11px 0;}
   .rail-label,.soon-pill{display:none;}
@@ -5329,6 +5386,7 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
   .tabbar{display:flex;}
   .editor{border-right:none;border-bottom:1px solid var(--border);max-height:360px;overflow-y:auto;}
   .app .editor{position:static;transform:none;opacity:1;}
+  .app .chartwrap{transform:none;}
   .chartwrap{order:-1;}
   .stats{grid-template-columns:repeat(2,1fr);}
 }
