@@ -818,6 +818,7 @@ const TYPE_LABEL = { cash: "Cash", investment: "Investments", pension: "Pensions
 const buildColors = (assets) => {
   const map = {};
   assets.forEach((a) => {
+    if (a.color) { map[a.id] = a.color; return; }
     const base = TYPE_HUE[a.type] || TYPE_HUE.investment;
     const idx = assets.filter((x) => x.type === a.type).findIndex((x) => x.id === a.id);
     map[a.id] = `hsl(${base.h} ${base.s}% ${Math.max(34, Math.min(74, base.l - idx * 8))}%)`;
@@ -832,6 +833,7 @@ const buildIncomeColors = (incomes) => {
   return map;
 };
 const typeSwatch = (type) => { const b = TYPE_HUE[type]; return `hsl(${b.h} ${b.s}% ${b.l}%)`; };
+const PALETTE = ['hsl(217 70% 52%)','hsl(185 80% 44%)','hsl(150 60% 42%)','hsl(45 90% 52%)','hsl(28 85% 55%)','hsl(0 65% 55%)','hsl(280 60% 55%)','hsl(320 60% 55%)','hsl(200 55% 55%)','hsl(90 55% 45%)'];
 const STACK_RANK = { property: 0, pension: 1, investment: 2, cash: 3 };
 const TOOLTIP_RANK = { cash: 0, investment: 1, pension: 2, property: 3 };
 
@@ -1125,6 +1127,49 @@ function StreamRow({ item, sym, kind, ectx, inflation, couple, ownerOpts, expand
 /* ================================================================== */
 /*  APP                                                               */
 /* ================================================================== */
+function RefLineLabel({ viewBox, value, color }) {
+  if (!viewBox || value == null) return null;
+  const { x, y } = viewBox;
+  const h = 18;
+  const pad = 8;
+  const w = Math.max(44, value.length * 5.6 + pad * 2);
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <rect x={x - w / 2} y={y - h - 7} width={w} height={h} rx={5}
+        fill="#0b1e30" stroke={color} strokeWidth={1.2} opacity={0.97} />
+      <text x={x} y={y - h - 7 + h * 0.7} textAnchor="middle"
+        fill={color} fontSize={9.5} fontFamily="Manrope, sans-serif" fontWeight={600}>
+        {value}
+      </text>
+    </g>
+  );
+}
+
+function XAgeTick({ x, y, payload, data, couple, fn1, fn2 }) {
+  if (!payload || payload.value == null) return null;
+  const row = data.find((d) => d.year === payload.value);
+  const tStyle = { fill: 'var(--mid)', fontSize: 11, fontWeight: 500, fontFamily: 'Manrope, sans-serif' };
+  const aStyle = { fill: 'var(--low)', fontSize: 9, fontWeight: 400, fontFamily: 'Manrope, sans-serif' };
+  let ageLine = null;
+  if (row) {
+    if (couple) {
+      const a1 = row.aliveC1 ? row.c1Age : null;
+      const a2 = row.aliveC2 ? row.c2Age : null;
+      if (a1 != null && a2 != null) ageLine = `${fn1[0]} ${a1} / ${fn2[0]} ${a2}`;
+      else if (a1 != null) ageLine = `${fn1[0]} ${a1}`;
+      else if (a2 != null) ageLine = `${fn2[0]} ${a2}`;
+    } else {
+      ageLine = row.aliveC1 ? `${row.c1Age}` : null;
+    }
+  }
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text x={0} y={0} dy={12} textAnchor="middle" style={tStyle}>{payload.value}</text>
+      {ageLine && <text x={0} y={0} dy={23} textAnchor="middle" style={aStyle}>{ageLine}</text>}
+    </g>
+  );
+}
+
 export default function RunwayApp({ initialData = null, onChange = null, scenarios = null, activeScenarioId = null, compareScenarioId = null, compareName = null, compareData = null, onScenarioAction = null, firmSettings = null, onFirmSettingsChange = null }) {
   const seed = initialData || SEED;
   // Sanitise: property assets should never silently default to drawable. Any legacy plan saved before
@@ -1186,6 +1231,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const applySurvivor = (ov) => startTransition(() => { setSurvivorOverlay(ov); setStress(null); setCi(null); });
   const clearScenario = () => startTransition(() => { setStress(null); setCi(null); setSurvivorOverlay(null); });
   const [annotations, setAnnotations] = useState(seed.annotations || []);
+  const [colorPickerAnchor, setColorPickerAnchor] = useState(null);
 
   const [profile, setProfile] = useState(seed.profile);
   const [assumptions, setAssumptions] = useState(seed.assumptions);
@@ -1441,13 +1487,21 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       assets.forEach((a) => (o["s_" + aKey(a.id)] = dz(sr[aKey(a.id)] || 0)));
     }
     o.nwNeg = Math.min(0, o.netWorth);
-    if (compareMap && compareMap.has(r.year)) o.cmp = compareMap.get(r.year);
+    if (compareMap && compareMap.has(r.year)) {
+      const cmpVal = compareMap.get(r.year);
+      const base = o.netWorth;
+      o.cmp = cmpVal;
+      o.cmpGreenFill = Math.max(0, cmpVal - base);
+      o.cmpLowBase = Math.min(base, cmpVal);
+      o.cmpRedFill = Math.max(0, base - cmpVal);
+    }
     assets.forEach((a) => (o[aKey(a.id)] = dz(r[aKey(a.id)] || 0)));
     incomes.forEach((i) => (o[iKey(i.id)] = dz(flow.incomeBy[i.id] || 0)));
     o.plannedDraw = dz(flow.plannedDraw || 0);
     const gap = Math.max(0, (flow.expenditure + (flow.contrib || 0)) - flow.income - (flow.plannedDraw || 0));
     o.coveredBySavings = dz(Math.max(0, gap - flow.shortfall));
     o.uncovered = dz(flow.shortfall);
+    o.surplus = dz(Math.max(0, flow.income - flow.expenditure - (flow.contrib || 0)));
     return o;
   }), [rows, showReal, inflDec, assets, incomes, stressRows, compareMap]);
 
@@ -1591,8 +1645,17 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
       const sTone = sDepletionAge === null ? "green" : sDepletionAge < 88 ? "red" : "amber";
       s = { atRetirement: sAtRetirement, endVal: sEndVal, depletionAge: sDepletionAge, depYear: sDepYear, tone: sTone };
     }
-    return { currentTotal, peak, atRetirement, endVal, endYear, depletionAge, depYear, depName, depRet, tone, s };
-  }, [rows, stressRows, assets, liabilities, ectx, baseYear, couple, fn1, fn2, inflDec, showReal]);
+    let cmp = null;
+    if (compareMap) {
+      const retYear = ectx.retC1 > ectx.age0c1 ? baseYear + (ectx.retC1 - ectx.age0c1) : null;
+      const lastYear = rows.length ? rows[rows.length - 1].year : null;
+      cmp = {
+        atRetirement: retYear && compareMap.has(retYear) ? compareMap.get(retYear) : null,
+        endVal: lastYear && compareMap.has(lastYear) ? compareMap.get(lastYear) : null,
+      };
+    }
+    return { currentTotal, peak, atRetirement, endVal, endYear, depletionAge, depYear, depName, depRet, tone, s, cmp };
+  }, [rows, stressRows, assets, liabilities, ectx, baseYear, couple, fn1, fn2, inflDec, showReal, compareMap]);
 
   // Compact, BASE-plan summary persisted to the client row (via onChange -> savePlan) so the
   // dashboard can show a health dot + net-worth sparkline without re-running the projection per
@@ -2288,6 +2351,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const addExp = () => addOpen(setExpenses, { id: uid(), name: "New expense", amount: 0, frequency: "annual", escalation: "inflation", customEsc: 0, everyYears: 1, start: { mode: "now" }, end: { mode: "end" }, priority: "essential", owner: "joint" }, expenses);
 
   const chartMargin = { top: 8, right: 14, left: 2, bottom: 0 };
+  const nwChartMargin = { top: 32, right: 14, left: 2, bottom: 0 };
   const axisWidth = 54;
   const tick = { fill: t.mid, fontSize: 11, fontWeight: 500, fontFamily: "Manrope, sans-serif" };
   const xInterval = Math.max(0, Math.floor(data.length / 8));
@@ -2732,7 +2796,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   return (
                     <div className={`rec ${expanded ? "open" : ""}`} key={a.id}>
                       <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(a.id, assets)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(a.id, assets); } }}>
-                        <span className="swatch" style={{ background: colors[a.id] }} />
+                        <span className="swatch" style={{ background: colors[a.id], cursor: 'pointer' }} title="Change colour" onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setColorPickerAnchor(colorPickerAnchor && colorPickerAnchor.id === a.id ? null : { id: a.id, top: rect.bottom + 6, left: rect.left }); }} />
                         <span className="rec-name-r" title={a.name || "Untitled"}>{a.name || "Untitled"}</span>
                         {couple && <span className="owner-chip">{ownerName}</span>}
                         <span className="rec-sum num">{sym}{(Number(a.value) || 0).toLocaleString()}</span>
@@ -2755,7 +2819,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                               <div className="rec-field rec-toggle"><label>Offshore bond (5% rule) <InfoTip text="UK offshore bonds (e.g. RL360, Zurich Intl): up to 5% of the original premium can be withdrawn each year with no immediate income tax, accruing for up to 20 years. Withdrawals beyond the allowance are taxed as income at the active jurisdiction's rate." /></label><Toggle on={!!a.offshoreBond} onClick={() => upAsset(a.id, { offshoreBond: !a.offshoreBond })} /></div>
                             )}
                           </div>
-                          <div className="contrib">
+                          {a.type !== 'property' && <div className="contrib">
                             <button className="contrib-head" onClick={() => upContrib(a.id, { enabled: !a.contribution.enabled })}><span className={`toggle sm ${a.contribution.enabled ? "on" : ""}`} aria-hidden="true"><span /></span> Regular contribution</button>
                             {a.contribution.enabled && (<>
                               <div className="rec-grid">
@@ -2778,7 +2842,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                                 <div className="rec-field"><label>Paid by <InfoTip text="Who funds this contribution. When that person dies or their income stops, this contribution stops - even if the pot itself is joint. To model two partners contributing different amounts to the same pot, set Partner A's contribution here and add a second asset of the same type for Partner B's share, or split the pot in two. One contribution entry = one contributor." /></label><Pick value={a.contribution.contributor || a.owner || "client1"} onChange={(v) => upContrib(a.id, { contributor: v })} options={ownerOpts} /><span className="inl-note">{a.contribution.contributor && a.contribution.contributor !== (a.owner || "client1") ? "stops when this person's income stops or they die" : "defaults to the asset owner"}</span></div>
                               )}
                             </>)}
-                          </div>
+                          </div>}
                           {a.type !== "property" && (
                             <div className="contrib">
                               <button className="contrib-head" onClick={() => upAsset(a.id, { withdrawal: { ...(a.withdrawal || withdrawalDefault()), enabled: !(a.withdrawal && a.withdrawal.enabled) } })}><span className={`toggle sm ${a.withdrawal && a.withdrawal.enabled ? "on" : ""}`} aria-hidden="true"><span /></span> Planned withdrawal</button>
@@ -3120,8 +3184,8 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
         <main className="chartwrap">
           <div className="stats">
             <Stat label="Net worth today" value={fmtCompact(kpis.currentTotal, cur)} sub={couple ? `${fn1} ${ectx.age0c1} (${baseYear}) · ${fn2} ${ectx.age0c2} (${baseYear})` : `age ${ectx.age0c1} (${baseYear})`} />
-            <Stat label={kpis.s ? "At retirement · scenario" : "At retirement"} value={fmtCompact(kpis.s ? kpis.s.atRetirement : kpis.atRetirement, cur)} sub={kpis.s ? <StatDelta scen={kpis.s.atRetirement} base={kpis.atRetirement} cur={cur} /> : (ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`)} tone={kpis.s && kpis.s.atRetirement < kpis.atRetirement ? "red" : undefined} />
-            <Stat label={kpis.s ? "Left at plan end · scenario" : "Left at plan end"} value={fmtCompact(kpis.s ? kpis.s.endVal : kpis.endVal, cur)} sub={endSplit && endSplit.propertyOnly ? `property only · spendable ran out age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}` : (kpis.s ? <StatDelta scen={kpis.s.endVal} base={kpis.endVal} cur={cur} /> : `in ${kpis.endYear}`)} tone={kpis.s && kpis.s.endVal < kpis.endVal ? "red" : undefined} />
+            <Stat label={kpis.s ? "At retirement · scenario" : kpis.cmp ? "At retirement · compare" : "At retirement"} value={fmtCompact(kpis.s ? kpis.s.atRetirement : kpis.cmp && kpis.cmp.atRetirement != null ? kpis.cmp.atRetirement : kpis.atRetirement, cur)} sub={kpis.s ? <StatDelta scen={kpis.s.atRetirement} base={kpis.atRetirement} cur={cur} /> : kpis.cmp && kpis.cmp.atRetirement != null ? <StatDelta scen={kpis.cmp.atRetirement} base={kpis.atRetirement} cur={cur} /> : (ectx.retC1 <= ectx.age0c1 ? "retired" : `${fn1} age ${ectx.retC1}`)} tone={kpis.s && kpis.s.atRetirement < kpis.atRetirement ? "red" : !kpis.s && kpis.cmp && kpis.cmp.atRetirement != null ? kpis.cmp.atRetirement < kpis.atRetirement ? "red" : "green" : undefined} />
+            <Stat label={kpis.s ? "Left at plan end · scenario" : kpis.cmp ? "Left at plan end · compare" : "Left at plan end"} value={fmtCompact(kpis.s ? kpis.s.endVal : kpis.cmp && kpis.cmp.endVal != null ? kpis.cmp.endVal : kpis.endVal, cur)} sub={endSplit && endSplit.propertyOnly ? `property only · spendable ran out age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}` : kpis.s ? <StatDelta scen={kpis.s.endVal} base={kpis.endVal} cur={cur} /> : kpis.cmp && kpis.cmp.endVal != null ? <StatDelta scen={kpis.cmp.endVal} base={kpis.endVal} cur={cur} /> : `in ${kpis.endYear}`} tone={kpis.s && kpis.s.endVal < kpis.endVal ? "red" : !kpis.s && kpis.cmp && kpis.cmp.endVal != null ? kpis.cmp.endVal < kpis.endVal ? "red" : "green" : undefined} />
             <Stat label={kpis.s ? "Plan longevity · scenario" : "Plan longevity"} value={(kpis.s ? kpis.s.depletionAge : kpis.depletionAge) === null ? "Fully funded" : `Age ${kpis.s ? kpis.s.depletionAge : kpis.depletionAge}`} sub={kpis.s ? (() => {
               const baseAge = kpis.depletionAge;
               const scenAge = kpis.s.depletionAge;
@@ -3228,20 +3292,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             )}
             <div className="chart-main">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={data} margin={chartMargin} {...yearChartHandlers}>
+                <ComposedChart data={data} margin={nwChartMargin} {...yearChartHandlers}>
                   <defs><linearGradient id="nwFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={t.netFill} stopOpacity={0.5} /><stop offset="100%" stopColor={t.netFill} stopOpacity={0.04} /></linearGradient></defs>
                   <CartesianGrid stroke={t.grid} vertical={false} />
-                  <XAxis dataKey="year" tick={tick} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} />
+                  <XAxis dataKey="year" tick={<XAgeTick data={data} couple={couple} fn1={fn1} fn2={fn2} />} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} height={38} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} position={{ y: 10 }} />
 
-                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value={couple && markers.retC2 === markers.retC1 ? "Both retire" : `${fn1} retires`} color={t.ink} />} />}
+                  {markers.retC2 && markers.retC2 !== markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value={`${fn2} retires`} color={t.ink} />} />}
                   {survivorOverlay
-                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />
-                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
-                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
-                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
+                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} label={<RefLineLabel value="Death" color={t.red} />} />
+                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} label={<RefLineLabel value="1st death" color={t.mid} />} />}
+                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} label={<RefLineLabel value="Runs short" color={t.red} />} />}
+                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} label={<RefLineLabel value="Cover pays" color={t.green} />} />)}
                   {storyComposition
                     ? stackOrder.filter((a) => !storyVisibleIds || storyVisibleIds.has(a.id)).map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
@@ -3252,6 +3316,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {(stress || ci || survivorOverlay) && <Line type="monotone" dataKey="netWorth" stroke={t.ink} strokeWidth={1.6} strokeDasharray="9 5" strokeOpacity={0.55} dot={false} isAnimationActive={false} />}
                   {nwHasNeg && <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sNeg" : "nwNeg"} baseValue={0} stroke="none" fill={t.red} fillOpacity={0.22} isAnimationActive={false} />}
                   {nwHasNeg && <ReferenceLine y={0} stroke={t.red} strokeWidth={1.2} strokeOpacity={0.7} />}
+                  {compareMap && <Area type="monotone" dataKey="netWorth" stackId="cmpg" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {compareMap && <Area type="monotone" dataKey="cmpGreenFill" stackId="cmpg" stroke="none" fill="hsl(150 65% 45%)" fillOpacity={0.24} isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {compareMap && <Area type="monotone" dataKey="cmpLowBase" stackId="cmpr" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {compareMap && <Area type="monotone" dataKey="cmpRedFill" stackId="cmpr" stroke="none" fill="hsl(0 65% 45%)" fillOpacity={0.24} isAnimationActive={false} legendType="none" tooltipType="none" />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke={t.panel} strokeWidth={5} dot={false} isAnimationActive={false} />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 80% 44%)" strokeWidth={2.6} dot={false} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
@@ -3268,6 +3336,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {data.some((d) => (d.uncovered || 0) > 0) && <span><i style={{ background: t.red }} /> Shortfall</span>}
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
                 {hasContrib && <span><i className="line-key dash" style={{ borderTopColor: t.mid }} /> + savings/contributions</span>}
+                {data.some((d) => (d.surplus || 0) > 0) && <span><i className="line-key dash" style={{ borderTopColor: 'hsl(140 60% 50%)' }} /> Surplus</span>}
                 {tax.enabled && <span className="legend-tax-badge">Tax on withdrawals active</span>}
               </div>
             </div>
@@ -3276,7 +3345,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <ComposedChart data={data} margin={chartMargin} {...yearChartHandlers}>
                   <CartesianGrid stroke={t.grid} vertical={false} />
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
-                  <XAxis dataKey="year" tick={tick} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} />
+                  <XAxis dataKey="year" tick={<XAgeTick data={data} couple={couple} fn1={fn1} fn2={fn2} />} axisLine={{ stroke: t.border }} tickLine={false} interval={xInterval} height={38} />
                   {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {survivorOverlay && <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />}
@@ -3287,6 +3356,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <Bar dataKey="uncovered" stackId="mio" fill={t.red} fillOpacity={0.9} isAnimationActive={false} radius={[2, 2, 0, 0]} />
                   <Line type="monotone" dataKey="expenditure" stroke={t.line} strokeWidth={2} dot={false} isAnimationActive={false} />
                   {hasContrib && <Line type="monotone" dataKey="outgoings" stroke={t.mid} strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
+                  <Line type="monotone" dataKey="surplus" stroke="hsl(140 60% 50%)" strokeWidth={2.2} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -4434,6 +4504,19 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
             </div>
           );
         })()}
+      {colorPickerAnchor && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 200 }} onClick={() => setColorPickerAnchor(null)} />
+          <div className="color-palette" style={{ position: 'fixed', top: colorPickerAnchor.top, left: colorPickerAnchor.left, zIndex: 201 }} onClick={(e) => e.stopPropagation()}>
+            {PALETTE.map((c) => (
+              <button key={c} className="pal-swatch" style={{ background: c }} onClick={() => { upAsset(colorPickerAnchor.id, { color: c }); setColorPickerAnchor(null); }} />
+            ))}
+            {(assets.find((a) => a.id === colorPickerAnchor.id) || {}).color && (
+              <button className="pal-reset" onClick={() => { upAsset(colorPickerAnchor.id, { color: null }); setColorPickerAnchor(null); }}>Auto colour</button>
+            )}
+          </div>
+        </>
+      )}
       </div>
     </div>
   );
@@ -4957,13 +5040,12 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .view-seg button.on{background:var(--accent-strong);color:#fff;}
 .legend{display:flex;flex-wrap:wrap;gap:13px;margin:10px 0 2px;font-size:11.5px;color:var(--mid);min-height:14px;}
 @media (max-width:1480px){.legend{gap:10px 11px;font-size:11px;}.legend i.line-key{width:14px;}}
-.legend.sm{gap:11px;font-size:11px;margin:6px 0 2px;}
+.legend.sm{gap:12px;font-size:11.5px;margin:6px 0 2px;}
 .legend span{display:flex;align-items:center;gap:6px;}
-.legend i{width:10px;height:10px;border-radius:3px;}
-.legend i.line-key{width:16px;height:0;border-radius:0;border-top:2px solid currentColor;background:transparent;}
-.legend i.line-key.dash{border-top-style:dashed;}
+.legend i{width:11px;height:11px;border-radius:3px;flex:none;}
+.legend i.line-key{width:26px;height:0;border-radius:0;border-top:3px solid currentColor;background:transparent;flex:none;}
+.legend i.line-key.dash{border-top:3px dashed currentColor;}
 .legend-tax-badge{font-size:10px;background:color-mix(in srgb,var(--amber) 15%,transparent);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent);border-radius:5px;padding:1px 7px;font-weight:600;}
-.legend i.line-key.dash{border-top-style:dashed;}
 .chart-main{height:clamp(240px,40vh,460px);margin-top:6px;}
 .chart-events{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0;}
 .evchip{display:inline-flex;align-items:center;gap:7px;font-size:11px;color:var(--mid);background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:3px 9px;}
@@ -5334,6 +5416,14 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
   .chartwrap{order:-1;}
   .stats{grid-template-columns:repeat(2,1fr);}
 }
+.swatch{cursor:default;}
+.swatch[title]{cursor:pointer;}
+.swatch[title]:hover{outline:2px solid rgba(255,255,255,0.5);outline-offset:1px;}
+.color-palette{background:var(--panel);border:1px solid var(--border-strong);border-radius:10px;padding:8px;display:flex;flex-wrap:wrap;gap:4px;width:138px;box-shadow:0 8px 24px rgba(10,20,40,.25);}
+.pal-swatch{width:22px;height:22px;border-radius:4px;border:none;cursor:pointer;padding:0;transition:transform .1s ease;}
+.pal-swatch:hover{transform:scale(1.18);outline:2px solid rgba(255,255,255,0.6);outline-offset:0;}
+.pal-reset{font-size:10px;color:var(--mid);background:none;border:1px solid var(--border);border-radius:5px;padding:3px 6px;cursor:pointer;width:100%;margin-top:2px;transition:border-color .12s ease;}
+.pal-reset:hover{border-color:var(--accent);color:var(--ink);}
 @media (max-width:560px){
   .stat-value{font-size:19px;}
   .summary-bar{flex-direction:column;gap:8px;}
