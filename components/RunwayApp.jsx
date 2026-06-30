@@ -569,7 +569,16 @@ function projectCashflow({ profile, assumptions, assets, incomes, expenses, liab
       if (b0 > 0) {
         const grown = b0 * Math.pow(1 + (Number(L.rate) || 0) / 100, frac);
         const sched = (Number(L.monthlyPayment) || 0) * 12 * frac;
-        const pay = Math.min(sched, grown);
+        let pay = Math.min(sched, grown);
+        // Optional "repaid in full by age": once the owner reaches the target age, the residual
+        // balance is cleared in that year (e.g. an interest-only mortgage settled from a lump sum).
+        // pay is capped at the outstanding balance, so the scheduled payment is never double-counted
+        // on top of the lump. After clearance the balance is 0, so no further repayments are charged.
+        const payoffAge = Number(L.payoffAge) || 0;
+        if (payoffAge > 0) {
+          const ownerAge = L.owner === "client2" ? c2Age : c1Age;
+          if (ownerAge >= payoffAge) pay = grown;
+        }
         liab[L.id] = Math.max(0, grown - pay);
         expenditure += pay;
         liabRepay += pay;
@@ -1206,6 +1215,10 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   // The last result is persisted with the plan (via onChange) so reopening doesn't require a re-run,
   // as long as the plan inputs haven't changed. The sig detects staleness on load.
   const [mcOpen, setMcOpen] = useState(false);
+  const [cnaOpen, setCnaOpen] = useState(false);
+  // Single-client capital needs analysis. Ephemeral tool state (like the survivor test inputs) -
+  // not persisted on the plan. depIncome 0 = the dependants' income-replacement line is off.
+  const [cna, setCna] = useState({ insured: "client1", finalExpenses: 5000, depIncome: 0, depYears: 1, legacy: 0, useLiquid: true, usePension: false, useProperty: false });
   const [mcLevel, setMcLevel] = useState((seed.mcResult && seed.mcResult.level) || "typical");
   const [mcResult, setMcResult] = useState(seed.mcResult || null); // { prob, fan, sig, level }
   const [mcRun, setMcRun] = useState({ running: false, progress: 0 });
@@ -1216,7 +1229,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [stressCfg, setStressCfg] = useState({ timing: "now", lens: "global", affects: "growth", custom: [-25, 10, 8] });
   const upStressCfg = (patch) => startTransition(() => setStressCfg((c) => ({ ...c, ...patch })));
   const [ci, setCi] = useState(null);
-  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000, mode: "permanent", resumeYears: 3 });
+  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 0, mode: "permanent", resumeYears: 3 });
   const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } - mirrors death to chart
   // Stress / critical-illness / survivor are three mutually-exclusive chart overlays. They MUST never be
   // active at once, or the headline label and the projected rows read from different scenarios (e.g. a
@@ -2201,7 +2214,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const clearExpenses = () => { setExpenses([]); setOpen(new Set()); };
   const clearLiabilities = () => { setLiabilities([]); setOpen(new Set()); };
   const clearProtection = () => { setProtection([]); setOpen(new Set()); };
-  const addLiab = () => addOpen(setLiabilities, { id: uid(), name: "New liability", type: "mortgage", balance: 0, rate: 4, monthlyPayment: 0, owner: couple ? "joint" : "client1" }, liabilities);
+  const addLiab = () => addOpen(setLiabilities, { id: uid(), name: "New liability", type: "mortgage", balance: 0, rate: 4, monthlyPayment: 0, payoffAge: 0, owner: couple ? "joint" : "client1" }, liabilities);
   const upPol = patch(setProtection), rmPol = rmFn(setProtection);
   const addPol = () => addOpen(setProtection, { id: uid(), name: "New policy", insured: "client1", sumAssured: 250000, premium: 50, coverToAge: 90 }, protection);
   const upContrib = (id, p) => setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, contribution: { ...a.contribution, ...p } } : a)));
@@ -2899,6 +2912,12 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {liabilities.map((L) => {
                   const expanded = open.has(L.id);
                   const ownerName = (ownerOpts.find((o) => o.value === (L.owner || "client1")) || {}).label || "";
+                  const payoffAge = Number(L.payoffAge) || 0;
+                  const hasPayoff = payoffAge > 0;
+                  const poOwner = (L.owner === "client2" ? profile.client2 : profile.client1) || profile.client1;
+                  const poCur = deriveAge(poOwner.dob) || 0;
+                  const poRet = Number(poOwner.retirementAge) || 0;
+                  const defPayoff = poRet > poCur ? poRet : poCur + 10;
                   return (
                     <div className={`rec ${expanded ? "open" : ""}`} key={L.id}>
                       <div className="rec-bar" role="button" tabIndex={0} onClick={() => openSolo(L.id, liabilities)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSolo(L.id, liabilities); } }}>
@@ -2922,8 +2941,20 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                             <div className="rec-field"><label>Interest rate <InfoTip text="The annual interest charged on the outstanding balance. The balance grows by this each year and is reduced by the repayments." /></label><Mini value={L.rate} step={0.1} suffix="%" onChange={(v) => upLiab(L.id, { rate: v })} /></div>
                             <div className="rec-field"><label>Monthly repayment</label><Money value={L.monthlyPayment} symbol={sym} onChange={(v) => upLiab(L.id, { monthlyPayment: v })} /></div>
                           </div>
-                          {(Number(L.balance) || 0) > 0 && (Number(L.monthlyPayment) || 0) * 12 < (Number(L.balance) || 0) * (Number(L.rate) || 0) / 100 && (
+                          <div className="liab-payoff">
+                            <div className="liab-payoff-head">
+                              <div><div className="lp-title">Repaid in full by a target age</div><div className="lp-sub">Clears the balance by {couple ? "the owner’s" : "a"} chosen age - useful for an interest-only mortgage settled from a lump sum or downsizing. Any balance left runs off as a one-off in that year and repayments then stop.</div></div>
+                              <Toggle on={hasPayoff} onClick={() => upLiab(L.id, { payoffAge: hasPayoff ? 0 : defPayoff })} />
+                            </div>
+                            {hasPayoff && (
+                              <div className="rec-field lp-age"><label>Paid off by age</label><Mini value={payoffAge} min={1} max={120} suffix="yrs" onChange={(v) => upLiab(L.id, { payoffAge: v })} /></div>
+                            )}
+                          </div>
+                          {(Number(L.balance) || 0) > 0 && !hasPayoff && (Number(L.monthlyPayment) || 0) * 12 < (Number(L.balance) || 0) * (Number(L.rate) || 0) / 100 && (
                             <div style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, fontSize: 12, lineHeight: 1.4, color: "var(--amber, #b45309)" }}><AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} /> Monthly repayment is below the annual interest - at this balance the debt grows over time rather than reducing, so it never clears.</div>
+                          )}
+                          {hasPayoff && (Number(L.balance) || 0) > 0 && (
+                            <div style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, fontSize: 12, lineHeight: 1.4, color: "var(--low)" }}><AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} /> Whatever is still owed at age {payoffAge} is cleared in full that year. Check the funds for that lump are reflected elsewhere in the plan.</div>
                           )}
                           <button className="del-row" onClick={() => rmLiab(L.id)}><Trash2 size={13} /> Remove</button>
                         </div>
@@ -3023,8 +3054,14 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                         <span className="field-note">Shortfall totals are in today's money. "Closes the gap" is the smallest lump sum at death under which no year shows a shortfall - an analysis of this plan, not a recommendation.</span>
                       </div>
                     )}
-                    {!couple && <span className="field-note">The survivor test applies to couples. For a single client, the benchmark above plus liabilities and estate intentions frame the conversation.</span>}
                   </div>
+                )}
+                {!couple && (
+                <div className="pg-block">
+                  <div className="ed-head"><h2 className="ed-title">Life cover needs analysis <SectionHelp content={{ what: "Adds up what would have to be paid on death - clear debts, cover the funeral, provide for any dependants, leave any legacy - then takes off what's already in place (existing cover and the savings you choose to count). What's left is the indicative life cover gap.", why: "A single client has no surviving partner's plan to keep funded. So the question isn't whether the plan still works - it's how much capital the estate would need on death, and how much of that is already covered. This sizes that gap from the plan's own figures.", tip: "It's a capital needs analysis focused on life cover. Pension and property are left out by default - pensions often pass outside the estate and a home is rarely sold to clear a debt. Turn them on only if you'd expect them to be used." }} /></h2></div>
+                  <p className="field-note" style={{ margin: "0 0 10px" }}>An indicative guide to the life cover this client needs, worked out from the debts, assets and cover already in the plan. Not a personal recommendation.</p>
+                  <button className="pg-chart-btn" onClick={() => setCnaOpen(true)}>Open life cover needs analysis</button>
+                </div>
                 )}
                 {/* Critical illness claim - a protection scenario (moved here from Stress test). Re-uses the
                     same `ci` chart overlay; worst case stops income for good, realistic case resumes it. */}
@@ -3569,6 +3606,67 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 <div className="modal-foot">Each answer moves one lever at a time - everything else is held constant. Tap the ? on a card for the assumptions behind it before quoting the number to a client.</div>
               </div>
             </div>
+          );
+        })()}
+        {cnaOpen && (() => {
+          const who = "client1";
+          const whoLabel = riskOwnerLabel(who);
+          const age0who = who === "client2" ? ectx.age0c2 : ectx.age0c1;
+          const liabTotal = liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0);
+          const finalExp = Math.max(0, Number(cna.finalExpenses) || 0);
+          const depIncome = Math.max(0, Number(cna.depIncome) || 0);
+          const depYears = Math.max(1, Math.round(Number(cna.depYears) || 1));
+          const depTotal = depIncome * depYears;
+          const legacy = Math.max(0, Number(cna.legacy) || 0);
+          const needTotal = liabTotal + finalExp + depTotal + legacy;
+          // Resources owned by the insured (or jointly). For a single client this is the whole plan.
+          const owns = (o) => { const ow = o || "client1"; return ow === who || ow === "joint"; };
+          const sumAssets = (types) => assets.filter((a) => owns(a.owner) && types.includes(a.type)).reduce((s, a) => s + (Number(a.value) || 0), 0);
+          const lifeCover = protection.filter((p) => (p.ptype || "life") !== "ci" && (p.insured || "client1") === who && (Number(p.coverToAge) || 0) > age0who).reduce((s, p) => s + (Number(p.sumAssured) || 0), 0);
+          const liquid = cna.useLiquid ? sumAssets(["cash", "investment"]) : 0;
+          const pension = cna.usePension ? sumAssets(["pension"]) : 0;
+          const property = cna.useProperty ? sumAssets(["property"]) : 0;
+          const resourceTotal = lifeCover + liquid + pension + property;
+          const recommended = Math.max(0, needTotal - resourceTotal);
+          const covered = resourceTotal >= needTotal;
+          const set = (patch) => setCna((c) => ({ ...c, ...patch }));
+          const addPolicy = () => { const sa = Math.ceil(recommended / 1000) * 1000; setProtection((ps) => [...ps, { id: uid(), name: `${whoLabel} cover`, insured: who, ptype: "life", sumAssured: sa, premium: 0, coverToAge: 120 }]); setCnaOpen(false); };
+          return (
+          <div className="modal-scrim" onClick={() => setCnaOpen(false)}>
+            <div className="modal cna-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head">
+                <div><div className="modal-title">Life cover needs analysis <SectionHelp content={{ what: "Adds up what would have to be paid on death - clear debts, cover the funeral, provide for any dependants, leave any legacy - then takes off what's already in place (existing cover and the savings you choose to count). What's left is the indicative life cover gap.", why: "A single client has no surviving partner's plan to keep funded, so the question is simply how much capital the estate would need on death and how much is already covered. This works that out from the plan's own figures.", tip: "Pension and property are left out by default: pensions often pass outside the estate and a home is rarely sold to clear a debt. Turn them on only if you'd expect them to be used." }} /></div><div className="modal-sub">How much life cover this client needs, from the plan's debts, assets and existing cover.</div></div>
+                <button className="icon-btn" onClick={() => setCnaOpen(false)}><XCircle size={18} /></button>
+              </div>
+              <div className="cna-cols">
+                <div className="cna-col">
+                  <div className="cna-col-head">What's needed on death</div>
+                  <div className="cna-line"><span>Clear all liabilities <InfoTip text="Total outstanding balances from the plan's Liabilities section." /></span><span className="num">{fmtFull(liabTotal, cur)}</span></div>
+                  <div className="cna-line cna-line-in"><span>Final expenses <InfoTip text="Funeral and estate-administration costs. A typical UK funeral is around £4,000-£5,000; adjust to the client's wishes." /></span><Money value={cna.finalExpenses} symbol={sym} onChange={(v) => set({ finalExpenses: v })} /></div>
+                  <div className="cna-line cna-line-in"><span>Dependants' income <InfoTip text="Annual income to replace for financial dependants (e.g. children), times the number of years. Leave at £0 if there are no dependants. This is a simple capital sum, not a discounted present value." /></span><Money value={cna.depIncome} symbol={sym} onChange={(v) => set({ depIncome: v })} /></div>
+                  <div className="cna-line cna-sub"><span>for</span><Mini value={cna.depYears} step={1} min={1} suffix="yrs" onChange={(v) => set({ depYears: Math.max(1, Math.round(Number(v) || 1)) })} /><span className="num">= {fmtFull(depTotal, cur)}</span></div>
+                  <div className="cna-line cna-line-in"><span>Legacy / bequest <InfoTip text="Any lump sum the client wants to leave beyond clearing debts and providing for dependants." /></span><Money value={cna.legacy} symbol={sym} onChange={(v) => set({ legacy: v })} /></div>
+                  <div className="cna-line cna-total"><span>Total needed</span><span className="num">{fmtFull(needTotal, cur)}</span></div>
+                </div>
+                <div className="cna-col">
+                  <div className="cna-col-head">What's already in place</div>
+                  <div className="cna-line"><span>Existing life cover <InfoTip text={`In-force life cover insuring ${whoLabel}, from the Protection section.`} /></span><span className="num">{fmtFull(lifeCover, cur)}</span></div>
+                  <div className="cna-line cna-line-tog"><span>Cash &amp; investments</span><span className="cna-tog"><span className="num">{fmtFull(liquid, cur)}</span><Toggle sm on={cna.useLiquid} onClick={() => set({ useLiquid: !cna.useLiquid })} /></span></div>
+                  <div className="cna-line cna-line-tog"><span>Pension pots <InfoTip text="Often pass to beneficiaries outside the estate, so counting them can understate the cover gap. Off by default." /></span><span className="cna-tog"><span className="num">{fmtFull(pension, cur)}</span><Toggle sm on={cna.usePension} onClick={() => set({ usePension: !cna.usePension })} /></span></div>
+                  <div className="cna-line cna-line-tog"><span>Property equity <InfoTip text="Usually illiquid or the dependants' home, so typically excluded. Off by default." /></span><span className="cna-tog"><span className="num">{fmtFull(property, cur)}</span><Toggle sm on={cna.useProperty} onClick={() => set({ useProperty: !cna.useProperty })} /></span></div>
+                  <div className="cna-line cna-total"><span>Total available</span><span className="num">{fmtFull(resourceTotal, cur)}</span></div>
+                </div>
+              </div>
+              <div className={`cna-verdict ${covered ? "pg-ok" : "pg-gap"}`}>
+                {covered ? (
+                  <><div className="cna-verdict-tag">Existing provision meets the need</div><div className="cna-verdict-text">Cover and counted assets total {fmtFull(resourceTotal, cur)} against a need of {fmtFull(needTotal, cur)} - a surplus of <b className="num">{fmtFull(resourceTotal - needTotal, cur)}</b>.</div></>
+                ) : (
+                  <><div className="cna-verdict-tag">Recommended additional cover</div><div className="cna-verdict-amt num">{fmtFull(recommended, cur)}</div><div className="cna-verdict-text">A need of {fmtFull(needTotal, cur)} less {fmtFull(resourceTotal, cur)} already in place. <button className="xc-btn" onClick={addPolicy}>Add as a life policy</button></div></>
+                )}
+              </div>
+              <div className="modal-foot">An analysis of this plan's figures, not a personal recommendation. Dependants' income is a simple capital sum, not a discounted present value. Pension and property are excluded unless you choose to count them.</div>
+            </div>
+          </div>
           );
         })()}
         {stressOpen && (
@@ -4913,6 +5011,31 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .surplus-opt.on .surplus-radio::after{content:"";position:absolute;inset:2.5px;border-radius:50%;background:var(--accent);}
 .surplus-opt-desc{font-size:11.5px;color:var(--low);line-height:1.45;padding-left:24px;}
 .surplus-dest{margin-top:11px;}
+.liab-payoff{margin-top:12px;padding:11px 12px;border:1px solid var(--border);border-radius:11px;background:var(--bg);}
+.liab-payoff-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;}
+.lp-title{font-size:13px;font-weight:650;color:var(--ink);}
+.lp-sub{font-size:11.5px;color:var(--low);line-height:1.45;margin-top:2px;}
+.lp-age{margin-top:11px;}
+.pg-cna-launch{margin-top:6px;}
+.cna-modal{max-width:680px;}
+.cna-cols{display:grid;grid-template-columns:1fr 1fr;gap:15px;}
+@media (max-width:640px){.cna-cols{grid-template-columns:1fr;}}
+.cna-col{border:1px solid var(--border);border-radius:12px;padding:12px 13px;background:var(--bg);}
+.cna-col-head{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mid);margin-bottom:8px;}
+.cna-line{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;color:var(--ink);padding:6px 0;}
+.cna-line-in,.cna-line-tog{border-top:1px solid var(--border);}
+.cna-line .money,.cna-line .mininum{max-width:132px;}
+.cna-sub{font-size:12px;color:var(--low);padding:2px 0 6px;border-top:none;}
+.cna-sub .mininum{max-width:94px;}
+.cna-tog{display:inline-flex;align-items:center;gap:10px;}
+.cna-total{border-top:1.5px solid var(--border-strong);margin-top:3px;font-weight:700;}
+.cna-verdict{margin-top:14px;border-radius:12px;padding:13px 15px;border:1px solid var(--border);}
+.cna-verdict.pg-ok{background:color-mix(in srgb, var(--green) 11%, var(--card));border-color:color-mix(in srgb, var(--green) 32%, var(--card));}
+.cna-verdict.pg-gap{background:color-mix(in srgb, var(--amber) 11%, var(--card));border-color:color-mix(in srgb, var(--amber) 32%, var(--card));}
+.cna-verdict-tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mid);}
+.cna-verdict-amt{font-size:26px;font-weight:700;letter-spacing:-.01em;margin:3px 0 4px;color:var(--ink);}
+.cna-verdict-text{font-size:12.5px;color:var(--low);line-height:1.55;}
+.cna-verdict-text .xc-btn{margin-left:5px;}
 .spend-primary{margin:14px 0 4px;padding:13px;border:1px solid var(--border);border-radius:12px;background:var(--bg);}
 .spend-mode{margin:9px 0 7px;}
 .spend-bands{margin-top:10px;display:flex;flex-direction:column;gap:7px;}
