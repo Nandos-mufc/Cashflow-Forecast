@@ -4647,7 +4647,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                           </div>
                         )}
                       </>)}
-                    {adviserNotes && adviserNotes.trim() && (
+                    {/[a-z]{3}/i.test((adviserNotes || "").replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/gi, "")) && (
                       <div className="rep-comm rep-comm-notes">
                         <div className="rep-comm-h">Adviser notes</div>
                         <p className="rep-comm-notes-text">{adviserNotes}</p>
@@ -5552,18 +5552,22 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
   .report-overlay { position: absolute; inset: 0; background: #fff; overflow: visible; }
   .report-no-print { display: none !important; }
   .report-sheet { margin: 0; border: none; border-radius: 0; box-shadow: none; padding: 0; max-width: none; }
-  .report-page { page-break-after: always; border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
-  .report-page.report-last { page-break-after: auto; }
-  .rep-table, .rep-kpi, .rep-chart, .rep-verdict, .rep-notes { break-inside: avoid; }
+  .report-page { border-bottom: none; padding-bottom: 16px; margin-bottom: 0; }
+  .rep-h2, .rep-h3 { break-after: avoid; }
+  .rep-kpi, .rep-chart, .rep-verdict, .rep-comm, .rep-exec-item, .rep-snap, .rep-person { break-inside: avoid; }
+  .rep-table { break-inside: auto; }
+  .rep-table thead { display: table-header-group; }
+  .rep-table tr { break-inside: avoid; }
+  .rep-foot { display: none !important; }
   .rep-notes-print-only { display: block; }
-  .rep-runhead { display: flex; align-items: center; justify-content: space-between; padding: 0 0 7px; margin: 0 0 16px; border-bottom: 1px solid #e6e9ee; }
+  .rep-runhead { display: none !important; }
   .rep-rh-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: -.01em; color: #102A43; }
   .rep-rh-doc { font-size: 10px; color: #7a8493; }
-  @page { size: A4; margin: 16mm; }
-  @page :first { margin: 0; }
-  .rep-coverpage { margin: 0; border-radius: 0; min-height: auto; }
-  .rep-coverpage .rep-cv { min-height: 100vh; padding: 24mm 22mm 0; }
-  .rep-coverpage .rep-cv-panel { margin: 0 -22mm; padding: 22px 22mm 26px; }
+  @page { size: A4; margin: 12mm; }
+  .rep-coverpage { margin: 0; border-radius: 0; min-height: 0; break-after: page; page-break-after: always; }
+  .rep-coverpage .rep-cv { height: 273mm; min-height: 0; padding: 30px 30px 0; box-sizing: border-box; overflow: hidden; }
+  .rep-coverpage .rep-cv-panel { margin: 0 -30px; padding: 20px 30px 22px; }
+  .rep-cv-motif { bottom: 150px; }
 }
 .cash-head{margin-top:12px;border-top:1px solid var(--border);padding-top:11px;}
 .cash-title{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
