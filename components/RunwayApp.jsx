@@ -2800,7 +2800,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                               <div className="rec-field rec-toggle"><label>Offshore bond (5% rule) <InfoTip text="UK offshore bonds (e.g. RL360, Zurich Intl): up to 5% of the original premium can be withdrawn each year with no immediate income tax, accruing for up to 20 years. Withdrawals beyond the allowance are taxed as income at the active jurisdiction's rate." /></label><Toggle on={!!a.offshoreBond} onClick={() => upAsset(a.id, { offshoreBond: !a.offshoreBond })} /></div>
                             )}
                           </div>
-                          <div className="contrib">
+                          {a.type !== 'property' && <div className="contrib">
                             <button className="contrib-head" onClick={() => upContrib(a.id, { enabled: !a.contribution.enabled })}><span className={`toggle sm ${a.contribution.enabled ? "on" : ""}`} aria-hidden="true"><span /></span> Regular contribution</button>
                             {a.contribution.enabled && (<>
                               <div className="rec-grid">
@@ -2823,7 +2823,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                                 <div className="rec-field"><label>Paid by <InfoTip text="Who funds this contribution. When that person dies or their income stops, this contribution stops - even if the pot itself is joint. To model two partners contributing different amounts to the same pot, set Partner A's contribution here and add a second asset of the same type for Partner B's share, or split the pot in two. One contribution entry = one contributor." /></label><Pick value={a.contribution.contributor || a.owner || "client1"} onChange={(v) => upContrib(a.id, { contributor: v })} options={ownerOpts} /><span className="inl-note">{a.contribution.contributor && a.contribution.contributor !== (a.owner || "client1") ? "stops when this person's income stops or they die" : "defaults to the asset owner"}</span></div>
                               )}
                             </>)}
-                          </div>
+                          </div>}
                           {a.type !== "property" && (
                             <div className="contrib">
                               <button className="contrib-head" onClick={() => upAsset(a.id, { withdrawal: { ...(a.withdrawal || withdrawalDefault()), enabled: !(a.withdrawal && a.withdrawal.enabled) } })}><span className={`toggle sm ${a.withdrawal && a.withdrawal.enabled ? "on" : ""}`} aria-hidden="true"><span /></span> Planned withdrawal</button>
@@ -3280,13 +3280,13 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <YAxis width={axisWidth} tick={tick} axisLine={false} tickLine={false} tickFormatter={(v) => fmtCompact(v, cur)} />
                   <Tooltip content={<CompTip />} cursor={{ stroke: t.borderStrong, strokeWidth: 1 }} position={{ y: 10 }} />
 
-                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={{ value: `${fn1} retires`, position: 'insideTopLeft', fill: t.ink, fillOpacity: 0.6, fontSize: 9 }} />}
-                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} label={{ value: `${fn2} retires`, position: 'insideTopLeft', fill: t.ink, fillOpacity: 0.6, fontSize: 9 }} />}
+                  {markers.retC1 && !(survivorOverlay && survivorOverlay.owner === "client1") && <ReferenceLine x={markers.retC1} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {markers.retC2 && !(survivorOverlay && survivorOverlay.owner === "client2") && <ReferenceLine x={markers.retC2} stroke={t.ink} strokeDasharray="4 3" strokeWidth={1.4} strokeOpacity={0.8} />}
                   {survivorOverlay
-                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} label={{ value: 'Death', position: 'insideTopLeft', fill: t.red, fillOpacity: 0.7, fontSize: 9 }} />
-                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} label={{ value: 'First death', position: 'insideTopLeft', fill: t.mid, fillOpacity: 0.7, fontSize: 9 }} />}
-                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} label={{ value: 'Runs short', position: 'insideTopLeft', fill: t.red, fillOpacity: 0.7, fontSize: 9 }} />}
-                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} label={{ value: 'Cover pays', position: 'insideTopLeft', fill: t.green, fillOpacity: 0.7, fontSize: 9 }} />)}
+                    ? <ReferenceLine x={baseYear + (survivorOverlay.deathAge - (survivorOverlay.owner === "client2" ? ectx.age0c2 : ectx.age0c1))} stroke={t.red} strokeDasharray="3 3" strokeWidth={1.8} strokeOpacity={0.9} />
+                    : markers.firstDeath && <ReferenceLine x={markers.firstDeath} stroke={t.mid} strokeDasharray="2 4" strokeWidth={1.4} strokeOpacity={0.8} />}
+                  {(kpis.s ? kpis.s.depYear : kpis.depYear) && <ReferenceLine x={kpis.s ? kpis.s.depYear : kpis.depYear} stroke={t.red} strokeDasharray="4 3" strokeWidth={1.5} strokeOpacity={0.9} />}
+                  {payoutEvents.map((e, i) => <ReferenceLine key={`pl${i}`} x={e.year} stroke={t.green} strokeDasharray="2 3" strokeWidth={1.4} strokeOpacity={0.85} />)}
                   {storyComposition
                     ? stackOrder.filter((a) => !storyVisibleIds || storyVisibleIds.has(a.id)).map((a) => <Area key={a.id} type="monotone" dataKey={(stress || ci || survivorOverlay) ? "s_" + aKey(a.id) : aKey(a.id)} stackId="nw" stroke={colors[a.id]} strokeWidth={0.8} fill={colors[a.id]} fillOpacity={0.88} isAnimationActive={false} />)
                     : <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "stressed" : "netWorth"} stroke={t.netStroke} strokeWidth={2.4} fill="url(#nwFill)" dot={false} isAnimationActive={false} />}
@@ -3298,9 +3298,9 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   {nwHasNeg && <Area type="monotone" dataKey={(stress || ci || survivorOverlay) ? "sNeg" : "nwNeg"} baseValue={0} stroke="none" fill={t.red} fillOpacity={0.22} isAnimationActive={false} />}
                   {nwHasNeg && <ReferenceLine y={0} stroke={t.red} strokeWidth={1.2} strokeOpacity={0.7} />}
                   {compareMap && <Area type="monotone" dataKey="netWorth" stackId="cmpg" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
-                  {compareMap && <Area type="monotone" dataKey="cmpGreenFill" stackId="cmpg" stroke="none" fill="hsl(150 65% 45%)" fillOpacity={0.18} isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {compareMap && <Area type="monotone" dataKey="cmpGreenFill" stackId="cmpg" stroke="none" fill="hsl(150 65% 45%)" fillOpacity={0.24} isAnimationActive={false} legendType="none" tooltipType="none" />}
                   {compareMap && <Area type="monotone" dataKey="cmpLowBase" stackId="cmpr" stroke="none" fill="none" isAnimationActive={false} legendType="none" tooltipType="none" />}
-                  {compareMap && <Area type="monotone" dataKey="cmpRedFill" stackId="cmpr" stroke="none" fill="hsl(0 65% 45%)" fillOpacity={0.18} isAnimationActive={false} legendType="none" tooltipType="none" />}
+                  {compareMap && <Area type="monotone" dataKey="cmpRedFill" stackId="cmpr" stroke="none" fill="hsl(0 65% 45%)" fillOpacity={0.24} isAnimationActive={false} legendType="none" tooltipType="none" />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke={t.panel} strokeWidth={5} dot={false} isAnimationActive={false} />}
                   {compareMap && <Line type="monotone" dataKey="cmp" stroke="hsl(185 80% 44%)" strokeWidth={2.6} dot={false} isAnimationActive={false} />}
                   {annotations.map((a, i) => (a.year ? <ReferenceLine key={a.id} x={Number(a.year)} stroke={noteColor(i)} strokeDasharray="5 4" strokeOpacity={0.85} strokeWidth={1.5} /> : null))}
@@ -3317,7 +3317,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                 {data.some((d) => (d.uncovered || 0) > 0) && <span><i style={{ background: t.red }} /> Shortfall</span>}
                 <span><i className="line-key" style={{ borderTopColor: t.ink }} /> Expenses</span>
                 {hasContrib && <span><i className="line-key dash" style={{ borderTopColor: t.mid }} /> + savings/contributions</span>}
-                {data.some((d) => (d.surplus || 0) > 0) && <span><i className="line-key dash" style={{ borderTopColor: 'hsl(185 80% 44%)' }} /> Surplus</span>}
+                {data.some((d) => (d.surplus || 0) > 0) && <span><i className="line-key dash" style={{ borderTopColor: 'hsl(140 60% 50%)' }} /> Surplus</span>}
                 {tax.enabled && <span className="legend-tax-badge">Tax on withdrawals active</span>}
               </div>
             </div>
@@ -3337,7 +3337,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <Bar dataKey="uncovered" stackId="mio" fill={t.red} fillOpacity={0.9} isAnimationActive={false} radius={[2, 2, 0, 0]} />
                   <Line type="monotone" dataKey="expenditure" stroke={t.line} strokeWidth={2} dot={false} isAnimationActive={false} />
                   {hasContrib && <Line type="monotone" dataKey="outgoings" stroke={t.mid} strokeWidth={1.4} strokeDasharray="5 3" dot={false} isAnimationActive={false} />}
-                  <Line type="monotone" dataKey="surplus" stroke="hsl(185 80% 44%)" strokeWidth={1.8} strokeDasharray="3 2" dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="surplus" stroke="hsl(140 60% 50%)" strokeWidth={2.2} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -5021,13 +5021,12 @@ input.num[type=number]::-webkit-outer-spin-button,input.num[type=number]::-webki
 .view-seg button.on{background:var(--accent-strong);color:#fff;}
 .legend{display:flex;flex-wrap:wrap;gap:13px;margin:10px 0 2px;font-size:11.5px;color:var(--mid);min-height:14px;}
 @media (max-width:1480px){.legend{gap:10px 11px;font-size:11px;}.legend i.line-key{width:14px;}}
-.legend.sm{gap:11px;font-size:11px;margin:6px 0 2px;}
+.legend.sm{gap:12px;font-size:11.5px;margin:6px 0 2px;}
 .legend span{display:flex;align-items:center;gap:6px;}
-.legend i{width:10px;height:10px;border-radius:3px;}
-.legend i.line-key{width:16px;height:0;border-radius:0;border-top:2px solid currentColor;background:transparent;}
-.legend i.line-key.dash{border-top-style:dashed;}
+.legend i{width:11px;height:11px;border-radius:3px;flex:none;}
+.legend i.line-key{width:26px;height:0;border-radius:0;border-top:3px solid currentColor;background:transparent;flex:none;}
+.legend i.line-key.dash{border-top:3px dashed currentColor;}
 .legend-tax-badge{font-size:10px;background:color-mix(in srgb,var(--amber) 15%,transparent);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent);border-radius:5px;padding:1px 7px;font-weight:600;}
-.legend i.line-key.dash{border-top-style:dashed;}
 .chart-main{height:clamp(240px,40vh,460px);margin-top:6px;}
 .chart-events{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0;}
 .evchip{display:inline-flex;align-items:center;gap:7px;font-size:11px;color:var(--mid);background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:3px 9px;}
