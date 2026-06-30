@@ -1218,7 +1218,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [cnaOpen, setCnaOpen] = useState(false);
   // Single-client capital needs analysis. Ephemeral tool state (like the survivor test inputs) -
   // not persisted on the plan. depIncome 0 = the dependants' income-replacement line is off.
-  const [cna, setCna] = useState({ insured: "client1", finalExpenses: 5000, depIncome: 0, depYears: 10, legacy: 0, useLiquid: true, usePension: false, useProperty: false });
+  const [cna, setCna] = useState({ insured: "client1", finalExpenses: 5000, depIncome: 0, depYears: 1, legacy: 0, useLiquid: true, usePension: false, useProperty: false });
   const [mcLevel, setMcLevel] = useState((seed.mcResult && seed.mcResult.level) || "typical");
   const [mcResult, setMcResult] = useState(seed.mcResult || null); // { prob, fan, sig, level }
   const [mcRun, setMcRun] = useState({ running: false, progress: 0 });
@@ -1229,7 +1229,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
   const [stressCfg, setStressCfg] = useState({ timing: "now", lens: "global", affects: "growth", custom: [-25, 10, 8] });
   const upStressCfg = (patch) => startTransition(() => setStressCfg((c) => ({ ...c, ...patch })));
   const [ci, setCi] = useState(null);
-  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 250000, mode: "permanent", resumeYears: 3 });
+  const [ciDraft, setCiDraft] = useState({ owner: "client1", age: 65, amount: 0, mode: "permanent", resumeYears: 3 });
   const [survivorOverlay, setSurvivorOverlay] = useState(null); // { owner, deathAge } - mirrors death to chart
   // Stress / critical-illness / survivor are three mutually-exclusive chart overlays. They MUST never be
   // active at once, or the headline label and the projected rows read from different scenarios (e.g. a
@@ -3615,7 +3615,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
           const liabTotal = liabilities.reduce((s, L) => s + (Number(L.balance) || 0), 0);
           const finalExp = Math.max(0, Number(cna.finalExpenses) || 0);
           const depIncome = Math.max(0, Number(cna.depIncome) || 0);
-          const depYears = Math.max(0, Math.round(Number(cna.depYears) || 0));
+          const depYears = Math.max(1, Math.round(Number(cna.depYears) || 1));
           const depTotal = depIncome * depYears;
           const legacy = Math.max(0, Number(cna.legacy) || 0);
           const needTotal = liabTotal + finalExp + depTotal + legacy;
@@ -3644,7 +3644,7 @@ export default function RunwayApp({ initialData = null, onChange = null, scenari
                   <div className="cna-line"><span>Clear all liabilities <InfoTip text="Total outstanding balances from the plan's Liabilities section." /></span><span className="num">{fmtFull(liabTotal, cur)}</span></div>
                   <div className="cna-line cna-line-in"><span>Final expenses <InfoTip text="Funeral and estate-administration costs. A typical UK funeral is around £4,000-£5,000; adjust to the client's wishes." /></span><Money value={cna.finalExpenses} symbol={sym} onChange={(v) => set({ finalExpenses: v })} /></div>
                   <div className="cna-line cna-line-in"><span>Dependants' income <InfoTip text="Annual income to replace for financial dependants (e.g. children), times the number of years. Leave at £0 if there are no dependants. This is a simple capital sum, not a discounted present value." /></span><Money value={cna.depIncome} symbol={sym} onChange={(v) => set({ depIncome: v })} /></div>
-                  <div className="cna-line cna-sub"><span>for</span><Mini value={cna.depYears} step={1} min={0} suffix="yrs" onChange={(v) => set({ depYears: v })} /><span className="num">= {fmtFull(depTotal, cur)}</span></div>
+                  <div className="cna-line cna-sub"><span>for</span><Mini value={cna.depYears} step={1} min={1} suffix="yrs" onChange={(v) => set({ depYears: Math.max(1, Math.round(Number(v) || 1)) })} /><span className="num">= {fmtFull(depTotal, cur)}</span></div>
                   <div className="cna-line cna-line-in"><span>Legacy / bequest <InfoTip text="Any lump sum the client wants to leave beyond clearing debts and providing for dependants." /></span><Money value={cna.legacy} symbol={sym} onChange={(v) => set({ legacy: v })} /></div>
                   <div className="cna-line cna-total"><span>Total needed</span><span className="num">{fmtFull(needTotal, cur)}</span></div>
                 </div>
